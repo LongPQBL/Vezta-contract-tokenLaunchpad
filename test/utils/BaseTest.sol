@@ -96,4 +96,11 @@ abstract contract BaseTest is Test {
     function _buyToCompletion(address who, address token) internal returns (uint256 amountOut) {
         (amountOut,) = _buy(who, token, type(uint256).max);
     }
+
+    function _sell(address who, address token, uint256 amount) internal returns (uint256 payout) {
+        vm.startPrank(who);
+        IERC20(token).approve(address(curve), amount);
+        payout = curve.sell(token, amount, 0);
+        vm.stopPrank();
+    }
 }

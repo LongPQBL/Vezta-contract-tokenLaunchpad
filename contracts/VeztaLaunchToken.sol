@@ -327,4 +327,60 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert EthTransferFailed();
     }
+
+    // ------------------------------------------------------------------
+    // Selling
+    // ------------------------------------------------------------------
+
+    function sell(address token, uint256 amount, uint256 minQuoteOutput)
+        external
+        nonReentrant
+        returns (uint256 payout)
+    {
+        Curve storage c = _activeCurve(token);
+        payout = _sell(c, token, amount, minQuoteOutput);
+        IERC20(c.quoteToken).safeTransfer(msg.sender, payout);
+    }
+
+    function sellForEth(address token, uint256 amount, uint256 minQuoteOutput)
+        external
+        nonReentrant
+        returns (uint256 payout)
+    {
+        Curve storage c = _activeCurve(token);
+        if (c.quoteToken != address(weth)) revert QuoteNotWeth();
+        payout = _sell(c, token, amount, minQuoteOutput);
+        weth.withdraw(payout);
+        _sendEth(msg.sender, payout);
+    }
+
+    /// @notice Gross quote released by the curve and the fee taken from it for a sell.
+    function previewSell(address token, uint256 amount) external view returns (uint256 quoteOut, uint256 fee) {
+        Curve storage c = _activeCurve(token);
+        if (amount == 0) revert ZeroAmount();
+        quoteOut = CurveMath.sellOutput(c.virtualTokenReserves, c.virtualQuoteReserves, amount);
+        fee = CurveMath.feeOf(quoteOut, tradeFeeBps);
+    }
+
+    /// @dev `realQuoteReserves -= quoteOut` is checked arithmetic: selling can never release more
+    ///      quote than the curve holds (unreachable in practice, see invariant tests).
+    function _sell(Curve storage c, address token, uint256 amount, uint256 minQuoteOutput)
+        private
+        returns (uint256 payout)
+    {
+        if (amount == 0) revert ZeroAmount();
+        uint256 quoteOut = CurveMath.sellOutput(c.virtualTokenReserves, c.virtualQuoteReserves, amount);
+        uint256 fee = CurveMath.feeOf(quoteOut, tradeFeeBps);
+        payout = quoteOut - fee;
+        if (payout < minQuoteOutput) revert SlippageExceeded();
+
+        c.virtualTokenReserves += amount;
+        c.virtualQuoteReserves -= quoteOut;
+        c.realTokenReserves += amount;
+        c.realQuoteReserves -= quoteOut;
+        _accrueFee(c, fee);
+
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        emit Trade(token, quoteOut, amount, false, msg.sender, block.timestamp, c.virtualQuoteReserves, c.virtualTokenReserves);
+    }
 }
