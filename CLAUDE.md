@@ -27,12 +27,13 @@ The design spec is kept locally by the maintainer and is not published; the comm
 
 ## Architecture
 
-- `contracts/TokenFactory.sol` — entry point. `deployERC20Token(name, ticker, metadataURI, quoteToken)`
+- `contracts/TokenFactory.sol` — entry point. `deployERC20Token(name, ticker, metadataURI, quoteToken, antiSniperWindow)`
   deploys a `Token`, pays the ETH create fee and calls `VeztaLaunchToken.createPool`. Metadata is only
   emitted in `TokenCreated`.
 - `contracts/VeztaLaunchToken.sol` — bonding-curve AMM and vault. Per-token `Curve` struct; quote
   whitelist (`setQuote`); `buy`/`sell` (ERC20 quote) and `buyWithEth`/`sellForEth` (WETH curves);
-  permissionless `migrate`; fees accrue in `accruedQuoteFees` / `accruedEth` / `creatorFees` and are
+  anti-sniper launch tax on buys (creator-chosen window of 0/60/600/5880 s, decaying 98% -> 0, taxed on the
+  amount paid, never enters the curve); permissionless `migrate`; fees accrue in `accruedQuoteFees` / `accruedEth` / `creatorFees` and are
   paid out by permissionless `claim*` functions to fixed recipients.
 - `contracts/Token.sol` — ERC20 that blocks transfers into its own Uniswap pair until migration, so
   nobody can seed the pool price before the curve does.

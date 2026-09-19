@@ -11,12 +11,16 @@ Built with [Foundry](https://book.getfoundry.sh/). Current target: Ethereum Sepo
 
 ## How it works
 
-1. `TokenFactory.deployERC20Token(name, ticker, metadataURI, quoteToken)` deploys a `Token`, pays the ETH
-   create fee, and seeds a bonding curve in `VeztaLaunchToken`.
+1. `TokenFactory.deployERC20Token(name, ticker, metadataURI, quoteToken, antiSniperWindow)` deploys a `Token`,
+   pays the ETH create fee, and seeds a bonding curve in `VeztaLaunchToken`.
 2. Buyers and sellers trade against the curve (`buy` / `sell`, or `buyWithEth` / `sellForEth` for WETH curves).
    A trade fee is charged; part of it goes to the token's creator.
-3. When 80% of the supply is sold, the curve is `complete` and trading stops.
-4. Anyone calls `migrate(token)`: the quote and the remaining 20% of supply go straight into the Uniswap V2 pair
+3. **Anti-sniper launch tax.** The creator picks a window (0, 60 seconds, 10 minutes or 98 minutes). Buys inside
+   the window pay a tax that starts at about 99% of the amount paid (98% tax plus the 1% base fee) and decays
+   linearly to zero; sells are never taxed. The tax is booked like any other fee (20% creator, 80% platform) and
+   never enters the curve, so the graduation math and the price continuity below are unchanged.
+4. When 80% of the supply is sold, the curve is `complete` and trading stops.
+5. Anyone calls `migrate(token)`: the quote and the remaining 20% of supply go straight into the Uniswap V2 pair
    and the LP tokens are sent to the dead address. The token then trades freely on Uniswap.
 
 The curve is constant-product with virtual reserves chosen so that the last curve price **equals** the
@@ -79,5 +83,7 @@ Migration is permissionless, so any wallet or bot can call `migrate(token)` afte
   curve contract were blacklisted, that curve's funds would be stuck.
 - If `migrate` reverts for an external reason, a completed curve has no rescue path by design (there is no owner
   withdrawal).
+- The launch tax reads `block.timestamp`. A validator can skew it by a few seconds, which changes the tax by a few
+  percent at most (the shortest window is 60 seconds).
 - Every failure path and exploit attempt has a test (`test/attack/`, `test/invariant/`); coverage is 100% of
   lines and branches, and Slither reports no High or Medium findings.
