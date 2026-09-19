@@ -383,4 +383,40 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         emit Trade(token, quoteOut, amount, false, msg.sender, block.timestamp, c.virtualQuoteReserves, c.virtualTokenReserves);
     }
+
+    // ------------------------------------------------------------------
+    // Migration
+    // ------------------------------------------------------------------
+
+    /// @notice Moves a completed curve's liquidity into its Uniswap V2 pair. Anyone can call.
+    function migrate(address token) external nonReentrant {
+        Curve storage c = curves[token];
+        if (c.tokenTotalSupply == 0) revert CurveNotFound();
+        if (!c.complete) revert NotCompleted();
+        if (c.migrated) revert AlreadyMigrated();
+
+        c.migrated = true;
+        uint256 quoteAmount = c.realQuoteReserves;
+        uint256 tokenAmount = c.realTokenReserves;
+        c.realQuoteReserves = 0;
+        c.realTokenReserves = 0;
+
+        address pair = _addLiquidity(token, c.quoteToken, c.pair, tokenAmount, quoteAmount);
+        ILaunchToken(token).openTrading();
+        emit Migrated(token, pair, quoteAmount, tokenAmount);
+    }
+
+    /// @dev DEX-specific step, kept isolated so another DEX adapter can replace it later.
+    function _addLiquidity(address token, address quote, address expectedPair, uint256 tokenAmount, uint256 quoteAmount)
+        private
+        returns (address pair)
+    {
+        pair = uniswapFactory.getPair(token, quote);
+        if (pair == address(0)) pair = uniswapFactory.createPair(token, quote);
+        if (pair != expectedPair) revert PairMismatch();
+        IERC20(quote).safeTransfer(pair, quoteAmount);
+        IERC20(token).safeTransfer(pair, tokenAmount);
+        // slither-disable-next-line unused-return (LP amount is not needed; all LP goes to DEAD)
+        IUniswapV2Pair(pair).mint(DEAD);
+    }
 }
