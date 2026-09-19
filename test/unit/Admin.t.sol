@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {BaseTest} from "../utils/BaseTest.sol";
 import {UniswapV2Deployer} from "../utils/UniswapV2Deployer.sol";
 import {VeztaLaunchToken} from "../../contracts/VeztaLaunchToken.sol";
+import {MockERC20} from "../mocks/MockERC20.sol";
 
 contract AdminTest is BaseTest {
     function test_ConstructorWiresUniswapFromRouter() public view {
@@ -100,11 +101,12 @@ contract AdminTest is BaseTest {
     }
 
     function test_SetQuote() public {
+        MockERC20 quote = new MockERC20("Quote", "Q", 6);
         vm.expectEmit(address(curve));
-        emit VeztaLaunchToken.QuoteSet(alice, 1_000_000, true);
+        emit VeztaLaunchToken.QuoteSet(address(quote), 1_000_000, true);
         vm.prank(owner);
-        curve.setQuote(alice, 1_000_000, true);
-        (bool enabled, uint256 graduation) = curve.quotes(alice);
+        curve.setQuote(address(quote), 1_000_000, true);
+        (bool enabled, uint256 graduation) = curve.quotes(address(quote));
         assertTrue(enabled);
         assertEq(graduation, 1_000_000);
     }
@@ -135,6 +137,34 @@ contract AdminTest is BaseTest {
         vm.expectRevert(VeztaLaunchToken.GraduationTooLarge.selector);
         curve.setQuote(weth, max + 1, true);
         vm.stopPrank();
+    }
+
+    function test_RevertWhen_SetQuoteSupplyTooLarge() public {
+        MockERC20 whale = new MockERC20("Whale", "WHL", 18);
+        uint256 graduation = 1_000 ether;
+        whale.mint(alice, type(uint112).max - graduation + 1);
+        vm.prank(owner);
+        vm.expectRevert(VeztaLaunchToken.QuoteSupplyTooLarge.selector);
+        curve.setQuote(address(whale), graduation, true);
+    }
+
+    function test_SetQuoteAtExactSupplyLimit() public {
+        MockERC20 whale = new MockERC20("Whale", "WHL", 18);
+        uint256 graduation = 1_000 ether;
+        whale.mint(alice, type(uint112).max - graduation);
+        vm.prank(owner);
+        curve.setQuote(address(whale), graduation, true);
+        (bool enabled,) = curve.quotes(address(whale));
+        assertTrue(enabled);
+    }
+
+    function test_DisablingAQuoteIgnoresItsSupply() public {
+        MockERC20 whale = new MockERC20("Whale", "WHL", 18);
+        whale.mint(alice, type(uint112).max);
+        vm.prank(owner);
+        curve.setQuote(address(whale), 0, false);
+        (bool enabled,) = curve.quotes(address(whale));
+        assertFalse(enabled);
     }
 
     function test_RevertWhen_RenounceOwnership() public {

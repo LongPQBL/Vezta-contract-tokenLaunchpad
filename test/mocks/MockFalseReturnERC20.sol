@@ -5,10 +5,12 @@ pragma solidity ^0.8.24;
 contract MockFalseReturnERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+    uint256 public totalSupply;
     uint8 public constant decimals = 18;
 
     function mint(address to, uint256 amount) external {
         balanceOf[to] += amount;
+        totalSupply += amount;
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {

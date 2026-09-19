@@ -108,6 +108,7 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
     error NothingToClaim();
     error GraduationTooSmall();
     error GraduationTooLarge();
+    error QuoteSupplyTooLarge();
     error RenounceDisabled();
 
     constructor(
@@ -175,6 +176,11 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         if (quote == address(0)) revert ZeroAddress();
         if (enabled && graduationAmount < MIN_GRADUATION_AMOUNT) revert GraduationTooSmall();
         if (enabled && graduationAmount > MAX_GRADUATION_AMOUNT) revert GraduationTooLarge();
+        // A holder can donate quote to the (not yet deployed) pair; if that plus the graduation amount
+        // exceeded Uniswap V2's uint112 reserves, `migrate` would revert forever and lock the curve.
+        if (enabled && IERC20(quote).totalSupply() > type(uint112).max - graduationAmount) {
+            revert QuoteSupplyTooLarge();
+        }
         quotes[quote] = QuoteConfig(enabled, graduationAmount);
         emit QuoteSet(quote, graduationAmount, enabled);
     }
