@@ -20,9 +20,10 @@ The design spec is kept locally by the maintainer and is not published; the comm
 - Sepolia fork tests (skipped without the env var): `SEPOLIA_RPC_URL=<rpc> forge test --match-path "test/fork/*"`
 - Coverage (target 100% lines and branches): `forge coverage --report summary --no-match-coverage "(test|script)"`
 - Gas snapshot: `forge snapshot --no-match-path "test/{invariant,fork}/*"`
+- Export ABIs for the frontend/backend: `./script/export-abi.sh` (`--check` in CI). ABIs are committed in `abi/`.
 - Static analysis: `.venv/bin/slither . --filter-paths "lib/|test/|script/"`
 - Deploy: `forge script script/Deploy.s.sol --rpc-url sepolia --account <keystore> --broadcast --verify`
-  (reads `deploy/<DEPLOY_CONFIG>.json`, default `sepolia`)
+  (reads `deploy/<DEPLOY_CONFIG>.json`, default `sepolia`; a broadcast run also writes `deployments/<name>.json`)
 - Whitelist a quote: `CURVE=<addr> QUOTE=<addr> AMOUNT=0.4 forge script script/SetQuote.s.sol --rpc-url sepolia --account <owner> --broadcast`
 
 ## Architecture

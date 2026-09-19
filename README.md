@@ -73,6 +73,29 @@ CURVE=<address> QUOTE=<address> AMOUNT=1000 forge script script/SetQuote.s.sol -
 
 Migration is permissionless, so any wallet or bot can call `migrate(token)` after a curve emits `Complete`.
 
+A real (broadcast) deploy also writes `deployments/<name>.json`: the contract addresses, the Uniswap V2 addresses, the
+owner and fee recipient, the git commit, and `deployBlock`, the block an indexer should start from. Commit that file
+after a real deploy; dry runs and tests never write it. Pass `GIT_COMMIT=$(git rev-parse --short HEAD)` to record the
+commit.
+
+### Rehearse on a local fork first
+
+```bash
+anvil --fork-url $SEPOLIA_RPC_URL --port 8545          # a free local copy of Sepolia
+GIT_COMMIT=rehearsal forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --private-key <anvil key 4> --broadcast
+```
+
+Use one of anvil's own keys **other than 0**, and never give an anvil address the owner or fee-recipient role: the
+well-known dev keys are swept by bots on public networks (EIP-7702 delegations), and a fork inherits that, so any ETH
+sent to them disappears.
+
+## For the frontend and backend
+
+`abi/` holds the ABIs (`*.json`, and `index.ts` with `as const` exports for viem and wagmi). Regenerate them with
+`./script/export-abi.sh` after any contract change; `./script/export-abi.sh --check` fails when they are stale, so CI
+can guard it. Integration guides, runnable viem examples and an indexer live in the web repository,
+[TokenLaunchPadProject](https://github.com/LongPQBL/TokenLaunchPadProject).
+
 ## Security notes
 
 - The owner cannot withdraw funds backing a live curve, and `renounceOwnership` is disabled. Ownership
