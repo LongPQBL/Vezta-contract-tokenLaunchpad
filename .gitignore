@@ -1,20 +1,13 @@
-node_modules
-.env
-
-# Hardhat files
+# Foundry
+/out
 /cache
-/artifacts
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+lcov.info
 
-# TypeChain files
-/typechain
-/typechain-types
-
-# solidity-coverage files
-/coverage
-/coverage.json
-
-# Hardhat Ignition default folder for deployments against a local node
-ignition/deployments/chain-31337
+# Local tooling
+.env
+.venv/
 
 # Local design docs (not published)
 docs/superpowers/specs/
