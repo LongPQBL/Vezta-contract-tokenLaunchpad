@@ -58,10 +58,21 @@ abstract contract BaseTest is Test {
         return _createTokenWith(factory, creator, quote);
     }
 
-    function _createTokenWith(TokenFactory f, address who, address quote) internal returns (address token) {
+    function _createTokenWithWindow(address quote, uint32 window) internal returns (address) {
+        return _createTokenFull(factory, creator, quote, window);
+    }
+
+    function _createTokenWith(TokenFactory f, address who, address quote) internal returns (address) {
+        return _createTokenFull(f, who, quote, 0);
+    }
+
+    function _createTokenFull(TokenFactory f, address who, address quote, uint32 window)
+        internal
+        returns (address token)
+    {
         vm.deal(who, who.balance + CREATE_FEE);
         vm.prank(who);
-        token = f.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", quote);
+        token = f.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", quote, window);
     }
 
     function _fundQuote(address who, address quote, uint256 amount) internal {

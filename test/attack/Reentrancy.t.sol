@@ -71,9 +71,9 @@ contract ReentrancyTest is BaseTest {
     }
 
     function test_Attack_ReenterFactoryFromCreateRefund() public {
-        attacker.arm(address(factory), abi.encodeCall(factory.deployERC20Token, ("X", "X", "", weth)));
+        attacker.arm(address(factory), abi.encodeCall(factory.deployERC20Token, ("X", "X", "", weth, 0)));
         vm.deal(address(attacker), 1 ether);
-        attacker.execute(address(factory), 1 ether, abi.encodeCall(factory.deployERC20Token, ("A", "A", "", weth)));
+        attacker.execute(address(factory), 1 ether, abi.encodeCall(factory.deployERC20Token, ("A", "A", "", weth, 0)));
         _assertReentryBlocked();
         assertEq(curve.accruedEth(), 2 * CREATE_FEE); // setUp token + one attacker token
     }

@@ -40,25 +40,32 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
         string calldata name,
         string calldata ticker,
         string calldata metadataURI,
-        address quoteToken
+        address quoteToken,
+        uint32 antiSniperWindow
     ) external payable nonReentrant returns (address token) {
         IVeztaLaunchToken curve = bondingCurve;
         if (address(curve) == address(0)) revert BondingCurveNotSet();
         uint256 fee = curve.createFee();
         if (msg.value < fee) revert InsufficientValue();
 
-        Token newToken = new Token(name, ticker, INITIAL_AMOUNT, address(curve));
-        token = address(newToken);
-        // slither-disable-next-line unused-return (OpenZeppelin ERC20.approve returns true or reverts)
-        newToken.approve(address(curve), INITIAL_AMOUNT);
-        curve.createPool{value: fee}(token, INITIAL_AMOUNT, msg.sender, quoteToken);
-
-        uint256 refund = msg.value - fee;
-        if (refund != 0) {
-            (bool ok,) = msg.sender.call{value: refund}("");
-            if (!ok) revert EthTransferFailed();
-        }
+        token = address(new Token(name, ticker, INITIAL_AMOUNT, address(curve)));
+        _seedCurve(curve, token, fee, quoteToken, antiSniperWindow);
+        _refund(msg.value - fee);
         emit TokenCreated(token, msg.sender, quoteToken, name, ticker, metadataURI);
+    }
+
+    function _seedCurve(IVeztaLaunchToken curve, address token, uint256 fee, address quoteToken, uint32 window)
+        private
+    {
+        // slither-disable-next-line unused-return (OpenZeppelin ERC20.approve returns true or reverts)
+        Token(token).approve(address(curve), INITIAL_AMOUNT);
+        curve.createPool{value: fee}(token, INITIAL_AMOUNT, msg.sender, quoteToken, window);
+    }
+
+    function _refund(uint256 amount) private {
+        if (amount == 0) return;
+        (bool ok,) = msg.sender.call{value: amount}("");
+        if (!ok) revert EthTransferFailed();
     }
 
     function renounceOwnership() public pure override {

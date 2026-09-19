@@ -55,7 +55,8 @@ contract LaunchpadHandler is Test {
         uint256 fee = curve.createFee();
         vm.deal(actor, actor.balance + fee);
         vm.prank(actor);
-        address token = factory.deployERC20Token{value: fee}("Fuzz", "FZ", "", quote);
+        uint32[4] memory windows = [uint32(0), 60, 600, 5_880];
+        address token = factory.deployERC20Token{value: fee}("Fuzz", "FZ", "", quote, windows[actorSeed % 4]);
         tokens.push(token);
         _recordK(token);
     }
@@ -138,6 +139,11 @@ contract LaunchpadHandler is Test {
         uint256 received = IERC20(quote).balanceOf(roundTripper) - before;
         if (received > paid) profitableRoundTrips++;
         _checkK(token);
+    }
+
+    /// @dev Lets time pass so launch-tax windows open and close during a run.
+    function warp(uint256 secs) external {
+        vm.warp(block.timestamp + bound(secs, 1, 2 hours));
     }
 
     // ------------------------------------------------------------------ hostile actions

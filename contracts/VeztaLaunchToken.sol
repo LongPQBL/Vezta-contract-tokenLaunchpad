@@ -45,6 +45,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         uint256 creatorFeeBps;
         bool complete;
         bool migrated;
+        uint64 launchTime;
+        uint32 antiSniperWindow;
     }
 
     IWETH public immutable weth;
@@ -65,7 +67,9 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
     mapping(address creator => mapping(address quote => uint256)) public creatorFees;
     mapping(address quote => uint256) public totalCreatorFees;
 
-    event CreatePool(address indexed mint, address indexed creator, address indexed quoteToken);
+    event CreatePool(
+        address indexed mint, address indexed creator, address indexed quoteToken, uint32 antiSniperWindow
+    );
     event Trade(
         address indexed mint,
         uint256 quoteAmount,
@@ -75,7 +79,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         uint256 timestamp,
         uint256 virtualQuoteReserves,
         uint256 virtualTokenReserves,
-        uint256 fee
+        uint256 fee,
+        uint256 launchTax
     );
     event Complete(address indexed user, address indexed mint, uint256 timestamp);
     event Migrated(address indexed mint, address indexed pair, uint256 quoteAmount, uint256 tokenAmount);
@@ -109,6 +114,7 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
     error NothingToClaim();
     error GraduationTooSmall();
     error GraduationTooLarge();
+    error InvalidAntiSniperWindow();
     error QuoteSupplyTooLarge();
     error RenounceDisabled();
 
@@ -194,7 +200,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
     // Pool creation
     // ------------------------------------------------------------------
 
-    function createPool(address token, uint256 amount, address creator, address quoteToken)
+    /// @param antiSniperWindow Seconds during which buys pay the decaying launch tax: 0, 60, 600 or 5880.
+    function createPool(address token, uint256 amount, address creator, address quoteToken, uint32 antiSniperWindow)
         external
         payable
         nonReentrant
@@ -202,6 +209,7 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         if (msg.sender != factory) revert NotFactory();
         if (msg.value != createFee) revert InsufficientValue();
         if (amount == 0) revert ZeroAmount();
+        if (!_isPresetWindow(antiSniperWindow)) revert InvalidAntiSniperWindow();
         QuoteConfig memory config = quotes[quoteToken];
         if (!config.enabled) revert QuoteNotEnabled();
         Curve storage c = curves[token];
@@ -220,11 +228,13 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         c.tokenTotalSupply = amount;
         c.floor = CurveMath.floorOf(amount);
         c.creatorFeeBps = creatorFeeBps;
+        c.launchTime = uint64(block.timestamp);
+        c.antiSniperWindow = antiSniperWindow;
         accruedEth += msg.value;
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         ILaunchToken(token).setPair(pair);
-        emit CreatePool(token, creator, quoteToken);
+        emit CreatePool(token, creator, quoteToken, antiSniperWindow);
     }
 
     // ------------------------------------------------------------------
@@ -233,6 +243,13 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
 
     function getCurve(address token) external view returns (Curve memory) {
         return curves[token];
+    }
+
+    /// @notice Current anti-sniper launch tax on buys of `token`, in bps of the amount paid.
+    function currentLaunchTaxBps(address token) external view returns (uint256) {
+        Curve storage c = curves[token];
+        if (c.tokenTotalSupply == 0) revert CurveNotFound();
+        return _launchTaxBps(c);
     }
 
     // ------------------------------------------------------------------
@@ -288,6 +305,14 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         return _quoteBuy(_activeCurve(token), amount, type(uint256).max);
     }
 
+    function _isPresetWindow(uint32 window) private pure returns (bool) {
+        return window == 0 || window == 60 || window == 600 || window == 5_880;
+    }
+
+    function _launchTaxBps(Curve storage c) private view returns (uint256) {
+        return CurveMath.launchTaxBps(block.timestamp - c.launchTime, c.antiSniperWindow);
+    }
+
     function _activeCurve(address token) private view returns (Curve storage c) {
         c = curves[token];
         if (c.tokenTotalSupply == 0) revert CurveNotFound();
@@ -303,7 +328,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         uint256 sellable = c.realTokenReserves - c.floor;
         amountOut = amount > sellable ? sellable : amount;
         quoteCost = CurveMath.buyCost(c.virtualTokenReserves, c.virtualQuoteReserves, amountOut);
-        fee = CurveMath.feeOf(quoteCost, tradeFeeBps);
+        uint256 baseFee = CurveMath.feeOf(quoteCost, tradeFeeBps);
+        fee = baseFee + CurveMath.taxOn(quoteCost + baseFee, _launchTaxBps(c));
         if (quoteCost + fee > maxQuoteCost) revert SlippageExceeded();
     }
 
@@ -313,6 +339,9 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         c.realTokenReserves -= amountOut;
         c.realQuoteReserves += quoteCost;
         _accrueFee(c, fee);
+        // Intended equality: the final buy is clipped to land exactly on the floor, and realTokenReserves is
+        // internal accounting that donations cannot change.
+        // slither-disable-next-line incorrect-equality
         if (c.realTokenReserves == c.floor) {
             c.complete = true;
             emit Complete(msg.sender, token, block.timestamp);
@@ -327,7 +356,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
             block.timestamp,
             c.virtualQuoteReserves,
             c.virtualTokenReserves,
-            fee
+            fee,
+            fee - CurveMath.feeOf(quoteCost, tradeFeeBps)
         );
     }
 
@@ -407,7 +437,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
             block.timestamp,
             c.virtualQuoteReserves,
             c.virtualTokenReserves,
-            fee
+            fee,
+            0
         );
     }
 

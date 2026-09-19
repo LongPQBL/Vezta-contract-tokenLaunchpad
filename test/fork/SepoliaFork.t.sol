@@ -44,7 +44,7 @@ contract SepoliaForkTest is Test {
         address creator = makeAddr("creator");
         vm.deal(creator, 1 ether);
         vm.prank(creator);
-        address token = factory.deployERC20Token{value: curve.createFee()}("Fork Test", "FORK", "ipfs://x", weth);
+        address token = factory.deployERC20Token{value: curve.createFee()}("Fork Test", "FORK", "ipfs://x", weth, 0);
 
         address buyer = makeAddr("buyer");
         vm.deal(buyer, 1 ether);

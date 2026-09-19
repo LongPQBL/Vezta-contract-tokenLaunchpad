@@ -77,6 +77,46 @@ contract CurveMathTest is Test {
         assertGe(CurveMath.buyCost(t0, q0, 1), 1);
     }
 
+    function test_LaunchTaxBps() public pure {
+        assertEq(CurveMath.launchTaxBps(0, 60), 9_800);
+        assertEq(CurveMath.launchTaxBps(15, 60), 7_350);
+        assertEq(CurveMath.launchTaxBps(30, 60), 4_900);
+        assertEq(CurveMath.launchTaxBps(45, 60), 2_450);
+        assertEq(CurveMath.launchTaxBps(59, 60), 163); // rounds down
+        assertEq(CurveMath.launchTaxBps(60, 60), 0);
+        assertEq(CurveMath.launchTaxBps(61, 60), 0);
+        assertEq(CurveMath.launchTaxBps(0, 0), 0);
+        assertEq(CurveMath.launchTaxBps(5, 0), 0);
+    }
+
+    function testFuzz_LaunchTaxNeverIncreasesAndIsBounded(uint256 elapsedA, uint256 elapsedB, uint256 window)
+        public
+        pure
+    {
+        window = bound(window, 1, 5_880);
+        elapsedA = bound(elapsedA, 0, 10_000);
+        elapsedB = bound(elapsedB, elapsedA, 10_000);
+        uint256 earlier = CurveMath.launchTaxBps(elapsedA, window);
+        uint256 later = CurveMath.launchTaxBps(elapsedB, window);
+        assertGe(earlier, later);
+        assertLe(earlier, CurveMath.MAX_LAUNCH_TAX_BPS);
+    }
+
+    function test_TaxOn() public pure {
+        assertEq(CurveMath.taxOn(1 ether, 9_800), 49 ether);
+        assertEq(CurveMath.taxOn(1 ether, 0), 0);
+        assertEq(CurveMath.taxOn(1, 1), 1); // rounds up
+    }
+
+    /// @dev `tax` is the smallest amount for which tax / (subtotal + tax) reaches `taxBps`.
+    function testFuzz_TaxIsTheRequestedShareOfTheTotal(uint256 subtotal, uint256 taxBps) public pure {
+        subtotal = bound(subtotal, 1, 1e36);
+        taxBps = bound(taxBps, 1, CurveMath.MAX_LAUNCH_TAX_BPS);
+        uint256 tax = CurveMath.taxOn(subtotal, taxBps);
+        assertGe(tax * (CurveMath.BPS - taxBps), subtotal * taxBps);
+        assertLt((tax - 1) * (CurveMath.BPS - taxBps), subtotal * taxBps);
+    }
+
     function test_FeeOf() public pure {
         assertEq(CurveMath.feeOf(1 ether, 100), 0.01 ether);
         assertEq(CurveMath.feeOf(99, 100), 0); // rounds down

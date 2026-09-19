@@ -57,7 +57,7 @@ abstract contract SellTestBase is BaseTest {
         IERC20(token).approve(address(curve), 1e18);
         vm.expectEmit(address(curve));
         emit VeztaLaunchToken.Trade(
-            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18, fee
+            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18, fee, 0
         );
         curve.sell(token, 1e18, 0);
         vm.stopPrank();

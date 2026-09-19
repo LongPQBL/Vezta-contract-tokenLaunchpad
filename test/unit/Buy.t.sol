@@ -64,7 +64,7 @@ abstract contract BuyTestBase is BaseTest {
         IERC20(quote).approve(address(curve), type(uint256).max);
         vm.expectEmit(address(curve));
         emit VeztaLaunchToken.Trade(
-            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18, fee
+            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18, fee, 0
         );
         curve.buy(token, 1e18, type(uint256).max);
         vm.stopPrank();
@@ -225,7 +225,7 @@ contract BuyWithEthTest is BaseTest {
         vm.deal(creator, CREATE_FEE);
         vm.prank(creator);
         vm.expectRevert(VeztaLaunchToken.NotFactory.selector);
-        factory.deployERC20Token{value: CREATE_FEE}("Old", "OLD", "", weth);
+        factory.deployERC20Token{value: CREATE_FEE}("Old", "OLD", "", weth, 0);
 
         _createTokenWith(newFactory, creator, weth);
         _buy(alice, oldToken, 1e24);

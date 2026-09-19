@@ -47,13 +47,13 @@ contract TokenFactoryTest is BaseTest {
         vm.expectEmit(false, true, true, true, address(factory));
         emit TokenFactory.TokenCreated(address(0), creator, weth, "Vezta Test", "VZT", "ipfs://metadata");
         vm.prank(creator);
-        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", weth);
+        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", weth, 0);
     }
 
     function test_CreateTokenRefundsExcessEth() public {
         vm.deal(creator, 1 ether);
         vm.prank(creator);
-        factory.deployERC20Token{value: 1 ether}("Vezta Test", "VZT", "ipfs://metadata", weth);
+        factory.deployERC20Token{value: 1 ether}("Vezta Test", "VZT", "ipfs://metadata", weth, 0);
         assertEq(creator.balance, 1 ether - CREATE_FEE);
         assertEq(address(factory).balance, 0);
     }
@@ -63,7 +63,7 @@ contract TokenFactoryTest is BaseTest {
         vm.deal(address(this), 1 ether);
         vm.expectRevert(TokenFactory.EthTransferFailed.selector);
         rejecter.execute{value: 1 ether}(
-            address(factory), abi.encodeCall(factory.deployERC20Token, ("Vezta Test", "VZT", "", weth))
+            address(factory), abi.encodeCall(factory.deployERC20Token, ("Vezta Test", "VZT", "", weth, 0))
         );
     }
 
@@ -71,7 +71,7 @@ contract TokenFactoryTest is BaseTest {
         vm.prank(owner);
         curve.setCreateFee(0);
         vm.prank(creator);
-        address token = factory.deployERC20Token("Free", "FREE", "", weth);
+        address token = factory.deployERC20Token("Free", "FREE", "", weth, 0);
         assertEq(curve.getCurve(token).tokenTotalSupply, SUPPLY);
         assertEq(curve.accruedEth(), 0);
     }
@@ -80,14 +80,14 @@ contract TokenFactoryTest is BaseTest {
         vm.deal(creator, CREATE_FEE);
         vm.prank(creator);
         vm.expectRevert(TokenFactory.InsufficientValue.selector);
-        factory.deployERC20Token{value: CREATE_FEE - 1}("Vezta Test", "VZT", "", weth);
+        factory.deployERC20Token{value: CREATE_FEE - 1}("Vezta Test", "VZT", "", weth, 0);
     }
 
     function test_RevertWhen_CreateTokenWithQuoteNotEnabled() public {
         vm.deal(creator, CREATE_FEE);
         vm.prank(creator);
         vm.expectRevert(VeztaLaunchToken.QuoteNotEnabled.selector);
-        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", alice);
+        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", alice, 0);
     }
 
     function test_RevertWhen_CreateTokenWithDisabledQuote() public {
@@ -96,20 +96,20 @@ contract TokenFactoryTest is BaseTest {
         vm.deal(creator, CREATE_FEE);
         vm.prank(creator);
         vm.expectRevert(VeztaLaunchToken.QuoteNotEnabled.selector);
-        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", address(usdc));
+        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", address(usdc), 0);
     }
 
     function test_RevertWhen_CreateTokenBeforeCurveIsSet() public {
         TokenFactory fresh = new TokenFactory(owner);
         vm.expectRevert(TokenFactory.BondingCurveNotSet.selector);
-        fresh.deployERC20Token("Vezta Test", "VZT", "", weth);
+        fresh.deployERC20Token("Vezta Test", "VZT", "", weth, 0);
     }
 
     function test_Attack_CreatePoolDirectlyIsRejected() public {
         vm.deal(alice, CREATE_FEE);
         vm.prank(alice);
         vm.expectRevert(VeztaLaunchToken.NotFactory.selector);
-        curve.createPool{value: CREATE_FEE}(alice, SUPPLY, alice, weth);
+        curve.createPool{value: CREATE_FEE}(alice, SUPPLY, alice, weth, 0);
     }
 
     function test_Attack_CreatePoolCannotOverwriteExistingCurve() public {
@@ -117,16 +117,16 @@ contract TokenFactoryTest is BaseTest {
         vm.deal(address(factory), CREATE_FEE);
         vm.prank(address(factory));
         vm.expectRevert(VeztaLaunchToken.CurveExists.selector);
-        curve.createPool{value: CREATE_FEE}(token, SUPPLY, alice, weth);
+        curve.createPool{value: CREATE_FEE}(token, SUPPLY, alice, weth, 0);
     }
 
     function test_RevertWhen_CreatePoolWrongValueOrZeroAmount() public {
         vm.deal(address(factory), 1 ether);
         vm.startPrank(address(factory));
         vm.expectRevert(VeztaLaunchToken.InsufficientValue.selector);
-        curve.createPool{value: CREATE_FEE + 1}(alice, SUPPLY, alice, weth);
+        curve.createPool{value: CREATE_FEE + 1}(alice, SUPPLY, alice, weth, 0);
         vm.expectRevert(VeztaLaunchToken.ZeroAmount.selector);
-        curve.createPool{value: CREATE_FEE}(alice, 0, alice, weth);
+        curve.createPool{value: CREATE_FEE}(alice, 0, alice, weth, 0);
         vm.stopPrank();
     }
 
