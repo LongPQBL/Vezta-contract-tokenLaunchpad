@@ -1,14 +1,83 @@
-## pump.fun clone: EVM Pumpfun Smart Contract(fork of pump.fun), implementing main functionalities of pump fun
-Solidity Smart Contact For pumpfun forking on EVM, pump.fun ethereum fork.
-It's for offering basic understanding about pumpfun on evm.
-- Token mint
-- Swap
-- Bonding Curve
-- Migration to Uniswap
+# Vezta Launchpad: EVM contracts
 
-### If you face difficulty or issues when you use it, feel free to reach out
+Smart contracts for a token launchpad. Anyone can launch a token (1 billion supply) that trades on a
+bonding curve against a whitelisted quote token (WETH today, other ERC20s such as USDC later). Once 80% of
+the supply is sold the curve completes, and anyone can migrate the collected quote plus the remaining 20% of
+supply into a Uniswap V2 pair, with the LP tokens burned.
 
-### Contact Information
-- Telegram: https://t.me/DevCutup
-- Whatsapp: https://wa.me/13137423660
-- Twitter: https://x.com/devcutup
+Built with [Foundry](https://book.getfoundry.sh/). Current target: Ethereum Sepolia.
+
+> **Status:** testnet demo, **not audited**. Do not deploy with real funds before an independent audit.
+
+## How it works
+
+1. `TokenFactory.deployERC20Token(name, ticker, metadataURI, quoteToken)` deploys a `Token`, pays the ETH
+   create fee, and seeds a bonding curve in `VeztaLaunchToken`.
+2. Buyers and sellers trade against the curve (`buy` / `sell`, or `buyWithEth` / `sellForEth` for WETH curves).
+   A trade fee is charged; part of it goes to the token's creator.
+3. When 80% of the supply is sold, the curve is `complete` and trading stops.
+4. Anyone calls `migrate(token)`: the quote and the remaining 20% of supply go straight into the Uniswap V2 pair
+   and the LP tokens are sent to the dead address. The token then trades freely on Uniswap.
+
+The curve is constant-product with virtual reserves chosen so that the last curve price **equals** the
+Uniswap pool price at graduation (no price drop for the last buyers). Graduation collects the configured
+`graduationAmount` of the quote token (up to a few units of rounding). Before migration, the token refuses
+transfers into its own Uniswap pair, so nobody can seed the pool price ahead of the curve.
+
+## Contracts
+
+| Contract | Role |
+|---|---|
+| `contracts/TokenFactory.sol` | Entry point. Deploys tokens and creates their curves. |
+| `contracts/VeztaLaunchToken.sol` | Bonding-curve AMM and vault: quote whitelist, trading, migration, fee accounting and claims. |
+| `contracts/Token.sol` | The launched ERC20, with the pre-migration pair lock. |
+| `contracts/libraries/CurveMath.sol` | Pure curve math. |
+| `contracts/libraries/PairAddress.sol` | CREATE2 address of a Uniswap V2 pair (the pair is only deployed at migration). |
+
+Fees accrue in ledgers and are paid out by permissionless `claim*` functions to fixed recipients (the platform's
+`feeRecipient` or the token creator), so a recipient that rejects payments can never block trading.
+
+## Commands
+
+```bash
+forge build
+forge test                                            # unit, attack and invariant tests
+forge test --match-test test_Attack_                  # only the exploit-attempt tests
+SEPOLIA_RPC_URL=<rpc> forge test --match-path "test/fork/*"   # against real Uniswap V2 on a Sepolia fork
+forge coverage --report summary --no-match-coverage "(test|script)"
+```
+
+Uniswap V2 is never compiled in this project. Tests deploy the official pre-built bytecode vendored in
+`test/uniswap-v2/` (regenerate with `script/vendor-uniswap-v2.sh`, verify with `shasum -a 256 -c SHA256SUMS`).
+
+## Deploying
+
+Parameters per chain live in `deploy/<name>.json` (`deploy/sepolia.json` is the template). Set the `owner` and
+`feeRecipient` addresses there (zero means "use the deployer"), then:
+
+```bash
+forge script script/Deploy.s.sol --rpc-url sepolia --account <keystore> --broadcast --verify
+```
+
+The script verifies the Uniswap router and the pair init code hash against a live pair before deploying, and
+whitelists WETH as the first quote token. To whitelist another quote token afterwards (amounts are in normal
+units and converted with the token's `decimals()`):
+
+```bash
+CURVE=<address> QUOTE=<address> AMOUNT=1000 forge script script/SetQuote.s.sol --rpc-url sepolia --account <owner> --broadcast
+```
+
+Migration is permissionless, so any wallet or bot can call `migrate(token)` after a curve emits `Complete`.
+
+## Security notes
+
+- The owner cannot withdraw funds backing a live curve, and `renounceOwnership` is disabled. Ownership
+  transfers take two steps.
+- A quote token must be a plain ERC20 (no fee-on-transfer, no rebasing) and its `totalSupply()` plus the
+  graduation amount must fit in `uint112`, the limit of a Uniswap V2 pair.
+- The owner is trusted to whitelist quote tokens carefully. Some stablecoins can blacklist addresses; if the
+  curve contract were blacklisted, that curve's funds would be stuck.
+- If `migrate` reverts for an external reason, a completed curve has no rescue path by design (there is no owner
+  withdrawal).
+- Every failure path and exploit attempt has a test (`test/attack/`, `test/invariant/`); coverage is 100% of
+  lines and branches, and Slither reports no High or Medium findings.

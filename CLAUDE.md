@@ -9,7 +9,8 @@ bonding curve against a whitelisted quote token (WETH today; USDC or others late
 supply is sold, migrates into a Uniswap V2 pair with the LP tokens burned. Built with Foundry.
 Target network for now: Ethereum Sepolia.
 
-The design spec lives in `docs/superpowers/specs/` and is intentionally gitignored (local only).
+The design spec is kept locally by the maintainer and is not published; the committed plan in
+`docs/superpowers/plans/`, the tests and this file are the public record.
 
 ## Commands
 
@@ -36,8 +37,8 @@ The design spec lives in `docs/superpowers/specs/` and is intentionally gitignor
 - `contracts/Token.sol` — ERC20 that blocks transfers into its own Uniswap pair until migration, so
   nobody can seed the pool price before the curve does.
 - `contracts/libraries/CurveMath.sol` — curve math. With L = 20% kept for the pool: virtual token
-  `16/15 * S`, virtual quote `G / 3`, floor `S / 5`; graduation collects exactly `G` and the last
-  curve price equals the pool price. Do not change one constant without re-deriving the others.
+  `16/15 * S`, virtual quote `G / 3`, floor `S / 5`; graduation collects `G` (within a few units of
+  rounding) and the last curve price equals the pool price (to within rounding). Do not change one constant without re-deriving the others.
 - `contracts/libraries/PairAddress.sol` — CREATE2 pair address (pair is only deployed at migrate).
 - Uniswap V2 is never compiled here: tests deploy vendored bytecode from `test/uniswap-v2/`
   (regenerate with `script/vendor-uniswap-v2.sh`, verify with `shasum -a 256 -c SHA256SUMS`).
