@@ -227,4 +227,104 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
     function getCurve(address token) external view returns (Curve memory) {
         return curves[token];
     }
+
+    // ------------------------------------------------------------------
+    // Buying
+    // ------------------------------------------------------------------
+
+    function buy(address token, uint256 amount, uint256 maxQuoteCost)
+        external
+        nonReentrant
+        returns (uint256 amountOut)
+    {
+        Curve storage c = _activeCurve(token);
+        uint256 quoteCost;
+        uint256 fee;
+        (amountOut, quoteCost, fee) = _quoteBuy(c, amount, maxQuoteCost);
+        uint256 total = quoteCost + fee;
+
+        IERC20 quote = IERC20(c.quoteToken);
+        uint256 balanceBefore = quote.balanceOf(address(this));
+        quote.safeTransferFrom(msg.sender, address(this), total);
+        if (quote.balanceOf(address(this)) - balanceBefore != total) revert QuoteTransferMismatch();
+
+        _applyBuy(c, token, amountOut, quoteCost, fee);
+    }
+
+    function buyWithEth(address token, uint256 amount, uint256 maxQuoteCost)
+        external
+        payable
+        nonReentrant
+        returns (uint256 amountOut)
+    {
+        Curve storage c = _activeCurve(token);
+        if (c.quoteToken != address(weth)) revert QuoteNotWeth();
+        uint256 quoteCost;
+        uint256 fee;
+        (amountOut, quoteCost, fee) = _quoteBuy(c, amount, maxQuoteCost);
+        uint256 total = quoteCost + fee;
+        if (msg.value < total) revert InsufficientValue();
+
+        weth.deposit{value: total}();
+        _applyBuy(c, token, amountOut, quoteCost, fee);
+
+        uint256 refund = msg.value - total;
+        if (refund != 0) _sendEth(msg.sender, refund);
+    }
+
+    /// @notice Tokens actually received (clipped at the floor), curve price and fee for a buy.
+    function previewBuy(address token, uint256 amount)
+        external
+        view
+        returns (uint256 amountOut, uint256 quoteCost, uint256 fee)
+    {
+        return _quoteBuy(_activeCurve(token), amount, type(uint256).max);
+    }
+
+    function _activeCurve(address token) private view returns (Curve storage c) {
+        c = curves[token];
+        if (c.tokenTotalSupply == 0) revert CurveNotFound();
+        if (c.complete) revert CurveCompleted();
+    }
+
+    function _quoteBuy(Curve storage c, uint256 amount, uint256 maxQuoteCost)
+        private
+        view
+        returns (uint256 amountOut, uint256 quoteCost, uint256 fee)
+    {
+        if (amount == 0) revert ZeroAmount();
+        uint256 sellable = c.realTokenReserves - c.floor;
+        amountOut = amount > sellable ? sellable : amount;
+        quoteCost = CurveMath.buyCost(c.virtualTokenReserves, c.virtualQuoteReserves, amountOut);
+        fee = CurveMath.feeOf(quoteCost, tradeFeeBps);
+        if (quoteCost + fee > maxQuoteCost) revert SlippageExceeded();
+    }
+
+    function _applyBuy(Curve storage c, address token, uint256 amountOut, uint256 quoteCost, uint256 fee) private {
+        c.virtualTokenReserves -= amountOut;
+        c.virtualQuoteReserves += quoteCost;
+        c.realTokenReserves -= amountOut;
+        c.realQuoteReserves += quoteCost;
+        _accrueFee(c, fee);
+        if (c.realTokenReserves == c.floor) {
+            c.complete = true;
+            emit Complete(msg.sender, token, block.timestamp);
+        }
+        IERC20(token).safeTransfer(msg.sender, amountOut);
+        emit Trade(token, quoteCost, amountOut, true, msg.sender, block.timestamp, c.virtualQuoteReserves, c.virtualTokenReserves);
+    }
+
+    /// @dev Splits a trade fee between the token creator (snapshot bps) and the platform.
+    function _accrueFee(Curve storage c, uint256 fee) private {
+        uint256 creatorPart = CurveMath.feeOf(fee, c.creatorFeeBps);
+        address quote = c.quoteToken;
+        creatorFees[c.creator][quote] += creatorPart;
+        totalCreatorFees[quote] += creatorPart;
+        accruedQuoteFees[quote] += fee - creatorPart;
+    }
+
+    function _sendEth(address to, uint256 amount) private {
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert EthTransferFailed();
+    }
 }
