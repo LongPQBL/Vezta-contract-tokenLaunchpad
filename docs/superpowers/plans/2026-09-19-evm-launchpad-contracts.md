@@ -12,6 +12,8 @@
 
 **How this plan was verified:** every code block below was written and run in a scratch project, and the project was rebuilt from scratch at every task boundary: each intermediate state compiles and its tests pass. Final state: 193 tests passing (8 invariants included), 100% line and branch coverage, no Slither findings at Medium or High, and both fork tests passing against live Sepolia. If an attack or invariant test fails while executing this plan, it is a real bug: fix the contract with `superpowers:systematic-debugging`; **never** weaken the test.
 
+**As built (after Part 2 at the end of this document):** 231 tests passing (8 invariants included; 1 fork test skips without an RPC URL), 100% line, statement, branch and function coverage of the five contract files (265/265 lines, 50/50 branches), Slither with no High or Medium findings (accepted Low: `missing-zero-check` x2, `reentrancy-benign`, `timestamp` x4 from the launch tax), and both live-Sepolia fork tests passing. The contracts are the ones described in `docs/superpowers/specs/2026-09-19-evm-launchpad-contracts-design.md` (final version, section 12 is the reference for a Solana port).
+
 ## Global Constraints
 
 - All code, comments, NatSpec, error messages, test names, commit messages, and this plan are in **English**.
@@ -20,6 +22,9 @@
 - Contracts live in `contracts/` (`src = "contracts"` in `foundry.toml`).
 - Supply per token: `10**27` (1 billion tokens, 18 decimals).
 - Share kept for the pool L = 20%: `floor = amount / 5`; initial virtual token `amount * 16 / 15`; initial virtual quote `graduationAmount / 3`.
+- Anti-sniper launch tax (added in Part 2): buys inside the creator-chosen window pay a tax on the amount paid that starts at `MAX_LAUNCH_TAX_BPS = 9_800` (98%, on top of the 1% base fee) and decays linearly to zero; the allowed windows are `0`, `60`, `600` and `5880` seconds; sells are never taxed; the tax is booked like any other fee and never enters the curve.
+- `setQuote` also requires `IERC20(quote).totalSupply() <= type(uint112).max - graduationAmount` (Part 2, Task 14).
+- `Trade` events end with `fee` and `launchTax` (Part 2, Tasks 15 and 16).
 - `MAX_TRADE_FEE_BPS = 500`; `MAX_CREATOR_FEE_BPS = 5_000`; `MIN_GRADUATION_AMOUNT = 1_000_000`; `MAX_GRADUATION_AMOUNT = type(uint112).max / 2`; LP burn address `0x000000000000000000000000000000000000dEaD`.
 - Sepolia defaults: `createFee = 0.001 ETH`, `tradeFeeBps = 100`, `creatorFeeBps = 2000`, WETH `graduationAmount = 0.4 ETH` (`400000000000000000`).
 - Uniswap V2 on Sepolia: router `0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3`, factory `0xF62c03E08ada871A0bEb309762E260a7a6a880E6`, WETH `0xfff9976782d46cc05630d1f6ebab18b2324d6b14`, `pairInitCodeHash = 0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f`.
@@ -4452,3 +4457,1357 @@ EOF
 - [ ] **Step 8: Report to the user; do not push**
 
 Summarize test count, coverage, Slither results and `migrate` gas. Ask whether to `git push` to `LongPQBL/Vezta-contract-tokenLaunchpad` and whether to deploy to Sepolia (deployment needs their wallet and keystore).
+
+---
+
+# Part 2: changes after the first plan was executed
+
+Tasks 1 to 13 above were executed as written and reviewed by an independent reviewer. The three tasks below record what was done afterwards, each as the exact diff of a real commit so the plan stays an accurate "as built" record. Every task follows the same rhythm: apply the test diff, watch it fail, apply the source diff, watch it pass, commit. Diffs apply with `git apply` (save the block to a file) or can be transcribed by hand.
+
+## Task 14: Reject quote tokens whose supply could overflow a Uniswap V2 pair
+
+**Origin:** the independent whole-branch review of Tasks 1 to 13 found one Important issue. A holder of a huge-supply quote token could transfer it to the (not yet deployed) pair address so that `pair.mint` hits Uniswap V2's `uint112` reserve check, which makes `migrate` revert forever and locks a completed curve. `setQuote` now requires `totalSupply() + graduationAmount` to fit in `uint112`. Not exploitable with WETH or USDC, but the spec allows any whitelisted ERC20. Commit `c4d0a0b`.
+
+**Files:**
+- Modify: `contracts/VeztaLaunchToken.sol`, `test/unit/Admin.t.sol`, `test/mocks/MockFalseReturnERC20.sol`, `test/mocks/MockNoReturnERC20.sol`
+- Create: `test/attack/SupplyLimit.t.sol`
+
+- [ ] **Step 1: Apply the test changes (they need the new error, so they fail to compile)**
+
+````diff
+diff --git a/test/attack/SupplyLimit.t.sol b/test/attack/SupplyLimit.t.sol
+new file mode 100644
+index 0000000..03e12db
+--- /dev/null
++++ b/test/attack/SupplyLimit.t.sol
+@@ -0,0 +1,28 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.24;
++
++import {BaseTest} from "../utils/BaseTest.sol";
++import {MockERC20} from "../mocks/MockERC20.sol";
++
++/// @notice A holder of the whole allowed quote supply must not be able to brick `migrate` by
++///         donating it to the (not yet deployed) pair: Uniswap V2 reserves are uint112.
++contract SupplyLimitTest is BaseTest {
++    function test_Attack_WholeAllowedSupplyDonatedToPairCannotBrickMigrate() public {
++        MockERC20 whale = new MockERC20("Whale", "WHL", 18);
++        uint256 graduation = 1_000 ether;
++        uint256 supply = type(uint112).max - graduation;
++        whale.mint(alice, supply);
++        vm.prank(owner);
++        curve.setQuote(address(whale), graduation, true);
++
++        address token = _createToken(address(whale));
++        address pair = curve.getCurve(token).pair;
++        vm.prank(alice);
++        whale.transfer(pair, supply); // donated to an address that has no code yet
++
++        _buyToCompletion(bob, token);
++        curve.migrate(token);
++
++        assertTrue(curve.getCurve(token).migrated);
++    }
++}
+diff --git a/test/mocks/MockFalseReturnERC20.sol b/test/mocks/MockFalseReturnERC20.sol
+index 4e43401..e133028 100644
+--- a/test/mocks/MockFalseReturnERC20.sol
++++ b/test/mocks/MockFalseReturnERC20.sol
+@@ -5,10 +5,12 @@ pragma solidity ^0.8.24;
+ contract MockFalseReturnERC20 {
+     mapping(address => uint256) public balanceOf;
+     mapping(address => mapping(address => uint256)) public allowance;
++    uint256 public totalSupply;
+     uint8 public constant decimals = 18;
+ 
+     function mint(address to, uint256 amount) external {
+         balanceOf[to] += amount;
++        totalSupply += amount;
+     }
+ 
+     function approve(address spender, uint256 amount) external returns (bool) {
+diff --git a/test/mocks/MockNoReturnERC20.sol b/test/mocks/MockNoReturnERC20.sol
+index 7f2154b..1e9e2c6 100644
+--- a/test/mocks/MockNoReturnERC20.sol
++++ b/test/mocks/MockNoReturnERC20.sol
+@@ -5,10 +5,12 @@ pragma solidity ^0.8.24;
+ contract MockNoReturnERC20 {
+     mapping(address => uint256) public balanceOf;
+     mapping(address => mapping(address => uint256)) public allowance;
++    uint256 public totalSupply;
+     uint8 public constant decimals = 6;
+ 
+     function mint(address to, uint256 amount) external {
+         balanceOf[to] += amount;
++        totalSupply += amount;
+     }
+ 
+     function approve(address spender, uint256 amount) external {
+diff --git a/test/unit/Admin.t.sol b/test/unit/Admin.t.sol
+index fcfca8f..5db531f 100644
+--- a/test/unit/Admin.t.sol
++++ b/test/unit/Admin.t.sol
+@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+ import {BaseTest} from "../utils/BaseTest.sol";
+ import {UniswapV2Deployer} from "../utils/UniswapV2Deployer.sol";
+ import {VeztaLaunchToken} from "../../contracts/VeztaLaunchToken.sol";
++import {MockERC20} from "../mocks/MockERC20.sol";
+ 
+ contract AdminTest is BaseTest {
+     function test_ConstructorWiresUniswapFromRouter() public view {
+@@ -100,11 +101,12 @@ contract AdminTest is BaseTest {
+     }
+ 
+     function test_SetQuote() public {
++        MockERC20 quote = new MockERC20("Quote", "Q", 6);
+         vm.expectEmit(address(curve));
+-        emit VeztaLaunchToken.QuoteSet(alice, 1_000_000, true);
++        emit VeztaLaunchToken.QuoteSet(address(quote), 1_000_000, true);
+         vm.prank(owner);
+-        curve.setQuote(alice, 1_000_000, true);
+-        (bool enabled, uint256 graduation) = curve.quotes(alice);
++        curve.setQuote(address(quote), 1_000_000, true);
++        (bool enabled, uint256 graduation) = curve.quotes(address(quote));
+         assertTrue(enabled);
+         assertEq(graduation, 1_000_000);
+     }
+@@ -137,6 +139,34 @@ contract AdminTest is BaseTest {
+         vm.stopPrank();
+     }
+ 
++    function test_RevertWhen_SetQuoteSupplyTooLarge() public {
++        MockERC20 whale = new MockERC20("Whale", "WHL", 18);
++        uint256 graduation = 1_000 ether;
++        whale.mint(alice, type(uint112).max - graduation + 1);
++        vm.prank(owner);
++        vm.expectRevert(VeztaLaunchToken.QuoteSupplyTooLarge.selector);
++        curve.setQuote(address(whale), graduation, true);
++    }
++
++    function test_SetQuoteAtExactSupplyLimit() public {
++        MockERC20 whale = new MockERC20("Whale", "WHL", 18);
++        uint256 graduation = 1_000 ether;
++        whale.mint(alice, type(uint112).max - graduation);
++        vm.prank(owner);
++        curve.setQuote(address(whale), graduation, true);
++        (bool enabled,) = curve.quotes(address(whale));
++        assertTrue(enabled);
++    }
++
++    function test_DisablingAQuoteIgnoresItsSupply() public {
++        MockERC20 whale = new MockERC20("Whale", "WHL", 18);
++        whale.mint(alice, type(uint112).max);
++        vm.prank(owner);
++        curve.setQuote(address(whale), 0, false);
++        (bool enabled,) = curve.quotes(address(whale));
++        assertFalse(enabled);
++    }
++
+     function test_RevertWhen_RenounceOwnership() public {
+         vm.prank(owner);
+         vm.expectRevert(VeztaLaunchToken.RenounceDisabled.selector);
+````
+
+- [ ] **Step 2: Run and confirm RED**
+
+Run: `forge test --match-path "test/{unit/Admin,attack/SupplyLimit}.t.sol"`
+Expected: compilation FAIL (`QuoteSupplyTooLarge` not found). If you first declare only the error, `test_RevertWhen_SetQuoteSupplyTooLarge` fails with `next call did not revert as expected`, which proves a huge-supply quote is accepted today.
+
+- [ ] **Step 3: Apply the source change**
+
+````diff
+diff --git a/contracts/VeztaLaunchToken.sol b/contracts/VeztaLaunchToken.sol
+index 69f7643..7a0941e 100644
+--- a/contracts/VeztaLaunchToken.sol
++++ b/contracts/VeztaLaunchToken.sol
+@@ -108,6 +108,7 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+     error NothingToClaim();
+     error GraduationTooSmall();
+     error GraduationTooLarge();
++    error QuoteSupplyTooLarge();
+     error RenounceDisabled();
+ 
+     constructor(
+@@ -175,6 +176,11 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         if (quote == address(0)) revert ZeroAddress();
+         if (enabled && graduationAmount < MIN_GRADUATION_AMOUNT) revert GraduationTooSmall();
+         if (enabled && graduationAmount > MAX_GRADUATION_AMOUNT) revert GraduationTooLarge();
++        // A holder can donate quote to the (not yet deployed) pair; if that plus the graduation amount
++        // exceeded Uniswap V2's uint112 reserves, `migrate` would revert forever and lock the curve.
++        if (enabled && IERC20(quote).totalSupply() > type(uint112).max - graduationAmount) {
++            revert QuoteSupplyTooLarge();
++        }
+         quotes[quote] = QuoteConfig(enabled, graduationAmount);
+         emit QuoteSet(quote, graduationAmount, enabled);
+     }
+````
+
+- [ ] **Step 4: Run and confirm GREEN**
+
+Run: `forge test`
+Expected: `197 tests passed` (193 from Part 1 plus 4 new), 1 fork test skipped.
+
+- [ ] **Step 5: Commit** with message `fix: reject quote tokens whose supply could overflow a Uniswap V2 pair` (plus the trailer from Global Constraints).
+
+## Task 15: Fee in the `Trade` event, tighter migrate tolerance, README and CLAUDE.md
+
+**Origin:** decisions taken on the deferred minor findings of the review. Indexers need the fee to rebuild a user's real payout, so `Trade` gains a `fee` field before any backend depends on the event. The seamless-price assertion in `Migrate.t.sol` is tightened from `1e13` to `5e11` (the measured error is about `2.5e11`, that is 2.5e-7 relative). `CurveMath.feeOf` documents that it rounds down. The upstream README (Hardhat instructions and the original author's contact links) is replaced by a README for this project, and `CLAUDE.md` wording is corrected. Commits `c6e964a` and `fef08e1`.
+
+**Files:**
+- Modify: `contracts/VeztaLaunchToken.sol`, `contracts/libraries/CurveMath.sol`, `test/unit/Buy.t.sol`, `test/unit/Sell.t.sol`, `test/unit/Migrate.t.sol`, `.gas-snapshot` (regenerate), `README.md`, `CLAUDE.md`
+
+- [ ] **Step 1: Apply the test changes**
+
+````diff
+diff --git a/test/unit/Buy.t.sol b/test/unit/Buy.t.sol
+index aaa5c77..0bb3c9a 100644
+--- a/test/unit/Buy.t.sol
++++ b/test/unit/Buy.t.sol
+@@ -57,14 +57,14 @@ abstract contract BuyTestBase is BaseTest {
+     }
+ 
+     function test_BuyEmitsTrade() public {
+-        (, uint256 cost,) = curve.previewBuy(token, 1e18);
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e18);
+         VeztaLaunchToken.Curve memory c = curve.getCurve(token);
+         _fundQuote(alice, quote, cost * 2);
+         vm.startPrank(alice);
+         IERC20(quote).approve(address(curve), type(uint256).max);
+         vm.expectEmit(address(curve));
+         emit VeztaLaunchToken.Trade(
+-            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18
++            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18, fee
+         );
+         curve.buy(token, 1e18, type(uint256).max);
+         vm.stopPrank();
+diff --git a/test/unit/Migrate.t.sol b/test/unit/Migrate.t.sol
+index 431edab..88f56f2 100644
+--- a/test/unit/Migrate.t.sol
++++ b/test/unit/Migrate.t.sol
+@@ -46,7 +46,7 @@ abstract contract MigrateTestBase is BaseTest {
+         assertApproxEqAbs(quoteReserve, _graduationOf(quote), 2);
+ 
+         // seamless price: last curve price vQ / vT equals pool price quoteReserve / tokenReserve
+-        assertApproxEqRel(c.virtualQuoteReserves * tokenReserve, quoteReserve * c.virtualTokenReserves, 1e13);
++        assertApproxEqRel(c.virtualQuoteReserves * tokenReserve, quoteReserve * c.virtualTokenReserves, 5e11);
+ 
+         uint256 lpSupply = IUniswapV2Pair(pair).totalSupply();
+         assertEq(IUniswapV2Pair(pair).balanceOf(DEAD), lpSupply - MINIMUM_LIQUIDITY);
+diff --git a/test/unit/Sell.t.sol b/test/unit/Sell.t.sol
+index 16c7db7..c5dc077 100644
+--- a/test/unit/Sell.t.sol
++++ b/test/unit/Sell.t.sol
+@@ -52,12 +52,12 @@ abstract contract SellTestBase is BaseTest {
+ 
+     function test_SellEmitsTrade() public {
+         VeztaLaunchToken.Curve memory c = curve.getCurve(token);
+-        (uint256 quoteOut,) = curve.previewSell(token, 1e18);
++        (uint256 quoteOut, uint256 fee) = curve.previewSell(token, 1e18);
+         vm.startPrank(alice);
+         IERC20(token).approve(address(curve), 1e18);
+         vm.expectEmit(address(curve));
+         emit VeztaLaunchToken.Trade(
+-            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18
++            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18, fee
+         );
+         curve.sell(token, 1e18, 0);
+         vm.stopPrank();
+````
+
+- [ ] **Step 2: Run and confirm RED**
+
+Run: `forge test --match-path "test/unit/{Buy,Sell}.t.sol"`
+Expected: compilation FAIL (`Wrong argument count for function call: 9 arguments given but expected 8`).
+
+- [ ] **Step 3: Apply the source change**
+
+````diff
+diff --git a/contracts/VeztaLaunchToken.sol b/contracts/VeztaLaunchToken.sol
+index 7a0941e..c8ed6f8 100644
+--- a/contracts/VeztaLaunchToken.sol
++++ b/contracts/VeztaLaunchToken.sol
+@@ -74,7 +74,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         address indexed user,
+         uint256 timestamp,
+         uint256 virtualQuoteReserves,
+-        uint256 virtualTokenReserves
++        uint256 virtualTokenReserves,
++        uint256 fee
+     );
+     event Complete(address indexed user, address indexed mint, uint256 timestamp);
+     event Migrated(address indexed mint, address indexed pair, uint256 quoteAmount, uint256 tokenAmount);
+@@ -317,7 +318,17 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+             emit Complete(msg.sender, token, block.timestamp);
+         }
+         IERC20(token).safeTransfer(msg.sender, amountOut);
+-        emit Trade(token, quoteCost, amountOut, true, msg.sender, block.timestamp, c.virtualQuoteReserves, c.virtualTokenReserves);
++        emit Trade(
++            token,
++            quoteCost,
++            amountOut,
++            true,
++            msg.sender,
++            block.timestamp,
++            c.virtualQuoteReserves,
++            c.virtualTokenReserves,
++            fee
++        );
+     }
+ 
+     /// @dev Splits a trade fee between the token creator (snapshot bps) and the platform.
+@@ -387,7 +398,17 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         _accrueFee(c, fee);
+ 
+         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+-        emit Trade(token, quoteOut, amount, false, msg.sender, block.timestamp, c.virtualQuoteReserves, c.virtualTokenReserves);
++        emit Trade(
++            token,
++            quoteOut,
++            amount,
++            false,
++            msg.sender,
++            block.timestamp,
++            c.virtualQuoteReserves,
++            c.virtualTokenReserves,
++            fee
++        );
+     }
+ 
+     // ------------------------------------------------------------------
+diff --git a/contracts/libraries/CurveMath.sol b/contracts/libraries/CurveMath.sol
+index 0c13b75..940fe55 100644
+--- a/contracts/libraries/CurveMath.sol
++++ b/contracts/libraries/CurveMath.sol
+@@ -35,6 +35,8 @@ library CurveMath {
+         return virtualQuote - newVirtualQuote;
+     }
+ 
++    /// @notice Fee on `amount`, rounded down. Dust trades on quotes with very few decimals can round to
++    ///         zero fee; the platform accepts that rather than over-charging every other trade.
+     function feeOf(uint256 amount, uint256 feeBps) internal pure returns (uint256) {
+         return amount * feeBps / BPS;
+     }
+````
+
+- [ ] **Step 4: Run and confirm GREEN, then refresh the gas snapshot**
+
+Run: `forge test` then `forge snapshot --no-match-path "test/{invariant,fork}/*"`
+Expected: `197 tests passed`; `.gas-snapshot` rewritten.
+
+- [ ] **Step 5: Commit** `feat: add fee to Trade event and tighten migrate price tolerance` including `.gas-snapshot`.
+
+- [ ] **Step 6: Replace the README and fix CLAUDE.md**
+
+````diff
+diff --git a/CLAUDE.md b/CLAUDE.md
+index a944d87..52a67f8 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -9,7 +9,8 @@ bonding curve against a whitelisted quote token (WETH today; USDC or others late
+ supply is sold, migrates into a Uniswap V2 pair with the LP tokens burned. Built with Foundry.
+ Target network for now: Ethereum Sepolia.
+ 
+-The design spec lives in `docs/superpowers/specs/` and is intentionally gitignored (local only).
++The design spec is kept locally by the maintainer and is not published; the committed plan in
++`docs/superpowers/plans/`, the tests and this file are the public record.
+ 
+ ## Commands
+ 
+@@ -36,8 +37,8 @@ The design spec lives in `docs/superpowers/specs/` and is intentionally gitignor
+ - `contracts/Token.sol` — ERC20 that blocks transfers into its own Uniswap pair until migration, so
+   nobody can seed the pool price before the curve does.
+ - `contracts/libraries/CurveMath.sol` — curve math. With L = 20% kept for the pool: virtual token
+-  `16/15 * S`, virtual quote `G / 3`, floor `S / 5`; graduation collects exactly `G` and the last
+-  curve price equals the pool price. Do not change one constant without re-deriving the others.
++  `16/15 * S`, virtual quote `G / 3`, floor `S / 5`; graduation collects `G` (within a few units of
++  rounding) and the last curve price equals the pool price (to within rounding). Do not change one constant without re-deriving the others.
+ - `contracts/libraries/PairAddress.sol` — CREATE2 pair address (pair is only deployed at migrate).
+ - Uniswap V2 is never compiled here: tests deploy vendored bytecode from `test/uniswap-v2/`
+   (regenerate with `script/vendor-uniswap-v2.sh`, verify with `shasum -a 256 -c SHA256SUMS`).
+diff --git a/README.md b/README.md
+index 00821b9..4f494a7 100644
+--- a/README.md
++++ b/README.md
+@@ -1,14 +1,83 @@
+-## pump.fun clone: EVM Pumpfun Smart Contract(fork of pump.fun), implementing main functionalities of pump fun
+-Solidity Smart Contact For pumpfun forking on EVM, pump.fun ethereum fork.
+-It's for offering basic understanding about pumpfun on evm.
+-- Token mint
+-- Swap
+-- Bonding Curve
+-- Migration to Uniswap
+-
+-### If you face difficulty or issues when you use it, feel free to reach out
+-
+-### Contact Information
+-- Telegram: https://t.me/DevCutup
+-- Whatsapp: https://wa.me/13137423660
+-- Twitter: https://x.com/devcutup
++# Vezta Launchpad: EVM contracts
++
++Smart contracts for a token launchpad. Anyone can launch a token (1 billion supply) that trades on a
++bonding curve against a whitelisted quote token (WETH today, other ERC20s such as USDC later). Once 80% of
++the supply is sold the curve completes, and anyone can migrate the collected quote plus the remaining 20% of
++supply into a Uniswap V2 pair, with the LP tokens burned.
++
++Built with [Foundry](https://book.getfoundry.sh/). Current target: Ethereum Sepolia.
++
++> **Status:** testnet demo, **not audited**. Do not deploy with real funds before an independent audit.
++
++## How it works
++
++1. `TokenFactory.deployERC20Token(name, ticker, metadataURI, quoteToken)` deploys a `Token`, pays the ETH
++   create fee, and seeds a bonding curve in `VeztaLaunchToken`.
++2. Buyers and sellers trade against the curve (`buy` / `sell`, or `buyWithEth` / `sellForEth` for WETH curves).
++   A trade fee is charged; part of it goes to the token's creator.
++3. When 80% of the supply is sold, the curve is `complete` and trading stops.
++4. Anyone calls `migrate(token)`: the quote and the remaining 20% of supply go straight into the Uniswap V2 pair
++   and the LP tokens are sent to the dead address. The token then trades freely on Uniswap.
++
++The curve is constant-product with virtual reserves chosen so that the last curve price **equals** the
++Uniswap pool price at graduation (no price drop for the last buyers). Graduation collects the configured
++`graduationAmount` of the quote token (up to a few units of rounding). Before migration, the token refuses
++transfers into its own Uniswap pair, so nobody can seed the pool price ahead of the curve.
++
++## Contracts
++
++| Contract | Role |
++|---|---|
++| `contracts/TokenFactory.sol` | Entry point. Deploys tokens and creates their curves. |
++| `contracts/VeztaLaunchToken.sol` | Bonding-curve AMM and vault: quote whitelist, trading, migration, fee accounting and claims. |
++| `contracts/Token.sol` | The launched ERC20, with the pre-migration pair lock. |
++| `contracts/libraries/CurveMath.sol` | Pure curve math. |
++| `contracts/libraries/PairAddress.sol` | CREATE2 address of a Uniswap V2 pair (the pair is only deployed at migration). |
++
++Fees accrue in ledgers and are paid out by permissionless `claim*` functions to fixed recipients (the platform's
++`feeRecipient` or the token creator), so a recipient that rejects payments can never block trading.
++
++## Commands
++
++```bash
++forge build
++forge test                                            # unit, attack and invariant tests
++forge test --match-test test_Attack_                  # only the exploit-attempt tests
++SEPOLIA_RPC_URL=<rpc> forge test --match-path "test/fork/*"   # against real Uniswap V2 on a Sepolia fork
++forge coverage --report summary --no-match-coverage "(test|script)"
++```
++
++Uniswap V2 is never compiled in this project. Tests deploy the official pre-built bytecode vendored in
++`test/uniswap-v2/` (regenerate with `script/vendor-uniswap-v2.sh`, verify with `shasum -a 256 -c SHA256SUMS`).
++
++## Deploying
++
++Parameters per chain live in `deploy/<name>.json` (`deploy/sepolia.json` is the template). Set the `owner` and
++`feeRecipient` addresses there (zero means "use the deployer"), then:
++
++```bash
++forge script script/Deploy.s.sol --rpc-url sepolia --account <keystore> --broadcast --verify
++```
++
++The script verifies the Uniswap router and the pair init code hash against a live pair before deploying, and
++whitelists WETH as the first quote token. To whitelist another quote token afterwards (amounts are in normal
++units and converted with the token's `decimals()`):
++
++```bash
++CURVE=<address> QUOTE=<address> AMOUNT=1000 forge script script/SetQuote.s.sol --rpc-url sepolia --account <owner> --broadcast
++```
++
++Migration is permissionless, so any wallet or bot can call `migrate(token)` after a curve emits `Complete`.
++
++## Security notes
++
++- The owner cannot withdraw funds backing a live curve, and `renounceOwnership` is disabled. Ownership
++  transfers take two steps.
++- A quote token must be a plain ERC20 (no fee-on-transfer, no rebasing) and its `totalSupply()` plus the
++  graduation amount must fit in `uint112`, the limit of a Uniswap V2 pair.
++- The owner is trusted to whitelist quote tokens carefully. Some stablecoins can blacklist addresses; if the
++  curve contract were blacklisted, that curve's funds would be stuck.
++- If `migrate` reverts for an external reason, a completed curve has no rescue path by design (there is no owner
++  withdrawal).
++- Every failure path and exploit attempt has a test (`test/attack/`, `test/invariant/`); coverage is 100% of
++  lines and branches, and Slither reports no High or Medium findings.
+````
+
+- [ ] **Step 7: Commit** `docs: replace upstream README and fix CLAUDE.md wording`.
+
+## Task 16: Creator-chosen anti-sniper launch tax on buys
+
+**Origin:** a product decision after comparing launchpads (pump.fun has no decaying fee; Clanker starts up to 80% and decays within 2 minutes; Virtuals taxes buys 99% decaying to 1% over a creator-chosen window of 0, 60 seconds, 10 minutes or 98 minutes; four.meme raises fees in the first blocks). The design follows Virtuals: buy side only, creator-chosen preset window, tax on the amount paid. Deliberate differences: the tax stays in the normal fee ledger (20% creator, 80% platform) instead of buying back tokens for the team, and the creator is not exempt (a 100% creator share would let insiders snipe for free). Buyback with vesting is deferred. Commits `4c1b13f` and `fe0f9e1`.
+
+**Design summary:**
+- Rate at `elapsed` seconds with window `W`: `t = 9800 * (W - elapsed) / W` bps, zero for `W = 0` or `elapsed >= W`.
+- Tax on the amount paid: with `S = quoteCost + baseFee`, `tax = ceil(S * t / (10000 - t))`, so `tax / (S + tax) = t`. At the end of the window `t = 0`, so the total fee is exactly the base fee (no jump).
+- The tax never enters the curve: `rQ` and `vQ` grow by `quoteCost` only, so the curve math, price continuity and graduation amount are unchanged. `fee = baseFee + tax` flows through `_accrueFee`.
+- `createPool` and `deployERC20Token` take `antiSniperWindow`; the curve stores `launchTime` and `antiSniperWindow` (packed with the two flags). `currentLaunchTaxBps(token)` is a view; `previewBuy` includes the tax at the current time; `Trade` ends with `fee, launchTax`; `CreatePool` ends with `antiSniperWindow`.
+- `TokenFactory.deployERC20Token` moves the seeding and refund into private helpers because the extra parameter made it exceed the stack limit.
+
+**Files:**
+- Modify: `contracts/libraries/CurveMath.sol`, `contracts/VeztaLaunchToken.sol`, `contracts/TokenFactory.sol`, `contracts/interfaces/IVeztaLaunchToken.sol`, `test/utils/BaseTest.sol`, `test/unit/CurveMath.t.sol`, `test/unit/TokenFactory.t.sol`, `test/unit/Buy.t.sol`, `test/unit/Sell.t.sol`, `test/attack/Reentrancy.t.sol`, `test/invariant/LaunchpadHandler.sol`, `test/fork/SepoliaFork.t.sol`, `.gas-snapshot` (regenerate), `README.md`, `CLAUDE.md`
+- Create: `test/unit/LaunchTax.t.sol`, `test/attack/LaunchTaxAttacks.t.sol`
+
+- [ ] **Step 1: Apply the test changes (new tests use the new API; existing tests pass window `0` to keep their behaviour)**
+
+````diff
+diff --git a/test/attack/LaunchTaxAttacks.t.sol b/test/attack/LaunchTaxAttacks.t.sol
+new file mode 100644
+index 0000000..b7572fc
+--- /dev/null
++++ b/test/attack/LaunchTaxAttacks.t.sol
+@@ -0,0 +1,42 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.24;
++
++import {BaseTest} from "../utils/BaseTest.sol";
++
++contract LaunchTaxAttacksTest is BaseTest {
++    /// @dev Splitting one buy into two cannot dodge the tax: the tax is a share of the money paid.
++    function test_Attack_SplittingABuyDoesNotReduceTheTax() public {
++        address whole = _createTokenWithWindow(weth, 60);
++        address split = _createTokenWithWindow(weth, 60);
++        uint256 half = 20_000_000e18;
++
++        (, uint256 paidWhole) = _buy(alice, whole, 2 * half);
++        (, uint256 paidFirst) = _buy(alice, split, half);
++        (, uint256 paidSecond) = _buy(alice, split, half);
++
++        // only per-trade rounding of the base fee can differ (a few wei), never the tax
++        assertGe(paidFirst + paidSecond + 100, paidWhole);
++    }
++
++    /// @dev A sniper cannot reach the base-fee price by waiting one second less than the window.
++    function test_Attack_TaxAtTheEdgeOfTheWindowIsNotBypassed() public {
++        uint256 start = block.timestamp;
++        address token = _createTokenWithWindow(weth, 600);
++        vm.warp(start + 599);
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e24);
++        assertGt(fee, cost * TRADE_FEE_BPS / 10_000);
++        vm.warp(start + 600);
++        (, cost, fee) = curve.previewBuy(token, 1e24);
++        assertEq(fee, cost * TRADE_FEE_BPS / 10_000);
++    }
++
++    /// @dev Re-running the launch does not restart the clock of an existing curve.
++    function test_Attack_LaunchClockIsFixedAtCreation() public {
++        uint256 start = block.timestamp;
++        address token = _createTokenWithWindow(weth, 60);
++        vm.warp(start + 30);
++        _createTokenWithWindow(weth, 60); // another launch must not touch this curve
++        assertEq(curve.currentLaunchTaxBps(token), 4_900);
++        assertEq(curve.getCurve(token).launchTime, start);
++    }
++}
+diff --git a/test/attack/Reentrancy.t.sol b/test/attack/Reentrancy.t.sol
+index 42b8e19..1867ce6 100644
+--- a/test/attack/Reentrancy.t.sol
++++ b/test/attack/Reentrancy.t.sol
+@@ -71,9 +71,9 @@ contract ReentrancyTest is BaseTest {
+     }
+ 
+     function test_Attack_ReenterFactoryFromCreateRefund() public {
+-        attacker.arm(address(factory), abi.encodeCall(factory.deployERC20Token, ("X", "X", "", weth)));
++        attacker.arm(address(factory), abi.encodeCall(factory.deployERC20Token, ("X", "X", "", weth, 0)));
+         vm.deal(address(attacker), 1 ether);
+-        attacker.execute(address(factory), 1 ether, abi.encodeCall(factory.deployERC20Token, ("A", "A", "", weth)));
++        attacker.execute(address(factory), 1 ether, abi.encodeCall(factory.deployERC20Token, ("A", "A", "", weth, 0)));
+         _assertReentryBlocked();
+         assertEq(curve.accruedEth(), 2 * CREATE_FEE); // setUp token + one attacker token
+     }
+diff --git a/test/fork/SepoliaFork.t.sol b/test/fork/SepoliaFork.t.sol
+index de6dd7c..086f2de 100644
+--- a/test/fork/SepoliaFork.t.sol
++++ b/test/fork/SepoliaFork.t.sol
+@@ -44,7 +44,7 @@ contract SepoliaForkTest is Test {
+         address creator = makeAddr("creator");
+         vm.deal(creator, 1 ether);
+         vm.prank(creator);
+-        address token = factory.deployERC20Token{value: curve.createFee()}("Fork Test", "FORK", "ipfs://x", weth);
++        address token = factory.deployERC20Token{value: curve.createFee()}("Fork Test", "FORK", "ipfs://x", weth, 0);
+ 
+         address buyer = makeAddr("buyer");
+         vm.deal(buyer, 1 ether);
+diff --git a/test/invariant/LaunchpadHandler.sol b/test/invariant/LaunchpadHandler.sol
+index 0e3fa93..e157995 100644
+--- a/test/invariant/LaunchpadHandler.sol
++++ b/test/invariant/LaunchpadHandler.sol
+@@ -55,7 +55,8 @@ contract LaunchpadHandler is Test {
+         uint256 fee = curve.createFee();
+         vm.deal(actor, actor.balance + fee);
+         vm.prank(actor);
+-        address token = factory.deployERC20Token{value: fee}("Fuzz", "FZ", "", quote);
++        uint32[4] memory windows = [uint32(0), 60, 600, 5_880];
++        address token = factory.deployERC20Token{value: fee}("Fuzz", "FZ", "", quote, windows[actorSeed % 4]);
+         tokens.push(token);
+         _recordK(token);
+     }
+@@ -140,6 +141,11 @@ contract LaunchpadHandler is Test {
+         _checkK(token);
+     }
+ 
++    /// @dev Lets time pass so launch-tax windows open and close during a run.
++    function warp(uint256 secs) external {
++        vm.warp(block.timestamp + bound(secs, 1, 2 hours));
++    }
++
+     // ------------------------------------------------------------------ hostile actions
+ 
+     function donateQuote(uint256 seed, uint256 amount) external {
+diff --git a/test/unit/Buy.t.sol b/test/unit/Buy.t.sol
+index 0bb3c9a..5f26888 100644
+--- a/test/unit/Buy.t.sol
++++ b/test/unit/Buy.t.sol
+@@ -64,7 +64,7 @@ abstract contract BuyTestBase is BaseTest {
+         IERC20(quote).approve(address(curve), type(uint256).max);
+         vm.expectEmit(address(curve));
+         emit VeztaLaunchToken.Trade(
+-            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18, fee
++            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18, fee, 0
+         );
+         curve.buy(token, 1e18, type(uint256).max);
+         vm.stopPrank();
+@@ -225,7 +225,7 @@ contract BuyWithEthTest is BaseTest {
+         vm.deal(creator, CREATE_FEE);
+         vm.prank(creator);
+         vm.expectRevert(VeztaLaunchToken.NotFactory.selector);
+-        factory.deployERC20Token{value: CREATE_FEE}("Old", "OLD", "", weth);
++        factory.deployERC20Token{value: CREATE_FEE}("Old", "OLD", "", weth, 0);
+ 
+         _createTokenWith(newFactory, creator, weth);
+         _buy(alice, oldToken, 1e24);
+diff --git a/test/unit/CurveMath.t.sol b/test/unit/CurveMath.t.sol
+index 05bdbf0..c7fd484 100644
+--- a/test/unit/CurveMath.t.sol
++++ b/test/unit/CurveMath.t.sol
+@@ -77,6 +77,46 @@ contract CurveMathTest is Test {
+         assertGe(CurveMath.buyCost(t0, q0, 1), 1);
+     }
+ 
++    function test_LaunchTaxBps() public pure {
++        assertEq(CurveMath.launchTaxBps(0, 60), 9_800);
++        assertEq(CurveMath.launchTaxBps(15, 60), 7_350);
++        assertEq(CurveMath.launchTaxBps(30, 60), 4_900);
++        assertEq(CurveMath.launchTaxBps(45, 60), 2_450);
++        assertEq(CurveMath.launchTaxBps(59, 60), 163); // rounds down
++        assertEq(CurveMath.launchTaxBps(60, 60), 0);
++        assertEq(CurveMath.launchTaxBps(61, 60), 0);
++        assertEq(CurveMath.launchTaxBps(0, 0), 0);
++        assertEq(CurveMath.launchTaxBps(5, 0), 0);
++    }
++
++    function testFuzz_LaunchTaxNeverIncreasesAndIsBounded(uint256 elapsedA, uint256 elapsedB, uint256 window)
++        public
++        pure
++    {
++        window = bound(window, 1, 5_880);
++        elapsedA = bound(elapsedA, 0, 10_000);
++        elapsedB = bound(elapsedB, elapsedA, 10_000);
++        uint256 earlier = CurveMath.launchTaxBps(elapsedA, window);
++        uint256 later = CurveMath.launchTaxBps(elapsedB, window);
++        assertGe(earlier, later);
++        assertLe(earlier, CurveMath.MAX_LAUNCH_TAX_BPS);
++    }
++
++    function test_TaxOn() public pure {
++        assertEq(CurveMath.taxOn(1 ether, 9_800), 49 ether);
++        assertEq(CurveMath.taxOn(1 ether, 0), 0);
++        assertEq(CurveMath.taxOn(1, 1), 1); // rounds up
++    }
++
++    /// @dev `tax` is the smallest amount for which tax / (subtotal + tax) reaches `taxBps`.
++    function testFuzz_TaxIsTheRequestedShareOfTheTotal(uint256 subtotal, uint256 taxBps) public pure {
++        subtotal = bound(subtotal, 1, 1e36);
++        taxBps = bound(taxBps, 1, CurveMath.MAX_LAUNCH_TAX_BPS);
++        uint256 tax = CurveMath.taxOn(subtotal, taxBps);
++        assertGe(tax * (CurveMath.BPS - taxBps), subtotal * taxBps);
++        assertLt((tax - 1) * (CurveMath.BPS - taxBps), subtotal * taxBps);
++    }
++
+     function test_FeeOf() public pure {
+         assertEq(CurveMath.feeOf(1 ether, 100), 0.01 ether);
+         assertEq(CurveMath.feeOf(99, 100), 0); // rounds down
+diff --git a/test/unit/LaunchTax.t.sol b/test/unit/LaunchTax.t.sol
+new file mode 100644
+index 0000000..a457701
+--- /dev/null
++++ b/test/unit/LaunchTax.t.sol
+@@ -0,0 +1,197 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.24;
++
++import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
++import {BaseTest} from "../utils/BaseTest.sol";
++import {VeztaLaunchToken} from "../../contracts/VeztaLaunchToken.sol";
++import {CurveMath} from "../../contracts/libraries/CurveMath.sol";
++
++/// @dev Anti-sniper launch tax: buys during the creator-chosen window pay a tax that decays
++///      linearly from 98% (plus the 1% base fee, about 99% in total) to zero. Sells are never taxed.
++abstract contract LaunchTaxTestBase is BaseTest {
++    address internal quote;
++
++    function _quoteToken() internal view virtual returns (address);
++
++    function setUp() public virtual override {
++        super.setUp();
++        quote = _quoteToken();
++    }
++
++    function test_CreatePoolStoresWindowAndLaunchTime() public {
++        uint256 launchedAt = block.timestamp;
++        address token = _createTokenWithWindow(quote, 600);
++        VeztaLaunchToken.Curve memory c = curve.getCurve(token);
++        assertEq(c.antiSniperWindow, 600);
++        assertEq(c.launchTime, launchedAt);
++    }
++
++    function test_EveryPresetWindowIsAccepted() public {
++        uint32[4] memory windows = [uint32(0), 60, 600, 5_880];
++        for (uint256 i; i < windows.length; ++i) {
++            address token = _createTokenWithWindow(quote, windows[i]);
++            assertEq(curve.getCurve(token).antiSniperWindow, windows[i]);
++        }
++    }
++
++    function test_RevertWhen_WindowIsNotAPreset() public {
++        uint32[4] memory bad = [uint32(1), 30, 601, 5_881];
++        for (uint256 i; i < bad.length; ++i) {
++            vm.deal(creator, CREATE_FEE);
++            vm.prank(creator);
++            vm.expectRevert(VeztaLaunchToken.InvalidAntiSniperWindow.selector);
++            factory.deployERC20Token{value: CREATE_FEE}("X", "X", "", quote, bad[i]);
++        }
++    }
++
++    function test_BuyPaysLaunchTaxAtCreation() public {
++        address token = _createTokenWithWindow(quote, 60);
++        uint256 amount = 10_000_000e18;
++        assertEq(curve.currentLaunchTaxBps(token), 9_800);
++
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, amount);
++        uint256 baseFee = cost * TRADE_FEE_BPS / 10_000;
++        uint256 tax = CurveMath.taxOn(cost + baseFee, 9_800);
++        assertEq(fee, baseFee + tax);
++        assertGt(tax, (cost + baseFee) * 48); // about 49x the price of the tokens
++
++        (, uint256 paid) = _buy(alice, token, amount);
++        assertEq(paid, cost + fee);
++        assertEq(curve.getCurve(token).realQuoteReserves, cost); // tax never enters the curve
++        uint256 creatorPart = fee * CREATOR_FEE_BPS / 10_000;
++        assertEq(curve.creatorFees(creator, quote), creatorPart);
++        assertEq(curve.accruedQuoteFees(quote), fee - creatorPart);
++    }
++
++    function test_TaxDecaysLinearlyAndVanishesAtWindowEnd() public {
++        uint256 start = block.timestamp;
++        address token = _createTokenWithWindow(quote, 60);
++        uint256[5] memory elapsed = [uint256(0), 15, 30, 45, 60];
++        uint256[5] memory expected = [uint256(9_800), 7_350, 4_900, 2_450, 0];
++        for (uint256 i; i < elapsed.length; ++i) {
++            vm.warp(start + elapsed[i]);
++            assertEq(curve.currentLaunchTaxBps(token), expected[i]);
++        }
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e24);
++        assertEq(fee, cost * TRADE_FEE_BPS / 10_000); // base fee only
++        vm.warp(start + 100_000);
++        assertEq(curve.currentLaunchTaxBps(token), 0);
++    }
++
++    function test_TaxIsStillChargedOneSecondBeforeTheWindowEnds() public {
++        uint256 start = block.timestamp;
++        address token = _createTokenWithWindow(quote, 60);
++        vm.warp(start + 59);
++        assertEq(curve.currentLaunchTaxBps(token), 163);
++        vm.warp(start + 60);
++        assertEq(curve.currentLaunchTaxBps(token), 0);
++    }
++
++    function test_NoTaxWhenWindowIsZero() public {
++        address token = _createTokenWithWindow(quote, 0);
++        assertEq(curve.currentLaunchTaxBps(token), 0);
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e24);
++        assertEq(fee, cost * TRADE_FEE_BPS / 10_000);
++    }
++
++    function test_SellIsNeverTaxed() public {
++        address token = _createTokenWithWindow(quote, 600);
++        (uint256 out,) = _buy(alice, token, 5_000_000e18);
++        (uint256 quoteOut, uint256 fee) = curve.previewSell(token, out);
++        assertEq(fee, quoteOut * TRADE_FEE_BPS / 10_000);
++        uint256 payout = _sell(alice, token, out);
++        assertEq(payout, quoteOut - fee);
++    }
++
++    function test_TaxDoesNotChangeCurveMathOrGraduation() public {
++        address token = _createTokenWithWindow(quote, 60);
++        _buyToCompletion(alice, token);
++        VeztaLaunchToken.Curve memory c = curve.getCurve(token);
++        assertTrue(c.complete);
++        assertApproxEqAbs(c.realQuoteReserves, _graduationOf(quote), 2);
++        curve.migrate(token);
++        assertTrue(curve.getCurve(token).migrated);
++    }
++
++    function test_MaxQuoteCostProtectsTheBuyerFromTheTax() public {
++        uint256 start = block.timestamp;
++        address token = _createTokenWithWindow(quote, 60);
++        vm.warp(start + 60);
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e24);
++        uint256 limit = cost + fee; // quoted after the window, included before it ends
++        vm.warp(start + 10);
++        _fundQuote(alice, quote, limit * 100);
++        vm.startPrank(alice);
++        IERC20(quote).approve(address(curve), type(uint256).max);
++        vm.expectRevert(VeztaLaunchToken.SlippageExceeded.selector);
++        curve.buy(token, 1e24, limit);
++        vm.stopPrank();
++    }
++
++    function test_CreatorSelfSnipingStillPaysMostOfTheTax() public {
++        address token = _createTokenWithWindow(quote, 60);
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 10_000_000e18);
++        (, uint256 paid) = _buy(creator, token, 10_000_000e18);
++        curve.claimCreatorFees(creator, quote);
++        uint256 recovered = IERC20(quote).balanceOf(creator);
++        assertEq(recovered, fee * CREATOR_FEE_BPS / 10_000); // only the creator share comes back
++        assertGe(paid - recovered, cost + fee - fee / 5);
++    }
++
++    function test_TradeEventCarriesTheLaunchTax() public {
++        address token = _createTokenWithWindow(quote, 60);
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e18);
++        uint256 tax = fee - cost * TRADE_FEE_BPS / 10_000;
++        VeztaLaunchToken.Curve memory c = curve.getCurve(token);
++        _fundQuote(alice, quote, (cost + fee) * 2);
++        vm.startPrank(alice);
++        IERC20(quote).approve(address(curve), type(uint256).max);
++        vm.expectEmit(address(curve));
++        emit VeztaLaunchToken.Trade(
++            token,
++            cost,
++            1e18,
++            true,
++            alice,
++            block.timestamp,
++            c.virtualQuoteReserves + cost,
++            c.virtualTokenReserves - 1e18,
++            fee,
++            tax
++        );
++        curve.buy(token, 1e18, type(uint256).max);
++        vm.stopPrank();
++        assertGt(tax, 0);
++    }
++
++    function test_RevertWhen_LaunchTaxQueriedForUnknownToken() public {
++        vm.expectRevert(VeztaLaunchToken.CurveNotFound.selector);
++        curve.currentLaunchTaxBps(alice);
++    }
++}
++
++contract LaunchTaxWethTest is LaunchTaxTestBase {
++    function _quoteToken() internal view override returns (address) {
++        return weth;
++    }
++}
++
++contract LaunchTaxUsdcTest is LaunchTaxTestBase {
++    function _quoteToken() internal view override returns (address) {
++        return address(usdc);
++    }
++}
++
++/// @notice Native-ETH entry point during the tax window.
++contract LaunchTaxEthTest is BaseTest {
++    function test_BuyWithEthPaysTaxAndRefundsTheExcess() public {
++        address token = _createTokenWithWindow(weth, 60);
++        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e24);
++        uint256 total = cost + fee;
++        vm.deal(alice, total + 5 ether);
++        vm.prank(alice);
++        curve.buyWithEth{value: total + 5 ether}(token, 1e24, total);
++        assertEq(alice.balance, 5 ether);
++        assertEq(curve.getCurve(token).realQuoteReserves, cost);
++    }
++}
+diff --git a/test/unit/Sell.t.sol b/test/unit/Sell.t.sol
+index c5dc077..ec50f84 100644
+--- a/test/unit/Sell.t.sol
++++ b/test/unit/Sell.t.sol
+@@ -57,7 +57,7 @@ abstract contract SellTestBase is BaseTest {
+         IERC20(token).approve(address(curve), 1e18);
+         vm.expectEmit(address(curve));
+         emit VeztaLaunchToken.Trade(
+-            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18, fee
++            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18, fee, 0
+         );
+         curve.sell(token, 1e18, 0);
+         vm.stopPrank();
+diff --git a/test/unit/TokenFactory.t.sol b/test/unit/TokenFactory.t.sol
+index 0153fb8..638c3d8 100644
+--- a/test/unit/TokenFactory.t.sol
++++ b/test/unit/TokenFactory.t.sol
+@@ -47,13 +47,13 @@ contract TokenFactoryTest is BaseTest {
+         vm.expectEmit(false, true, true, true, address(factory));
+         emit TokenFactory.TokenCreated(address(0), creator, weth, "Vezta Test", "VZT", "ipfs://metadata");
+         vm.prank(creator);
+-        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", weth);
++        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", weth, 0);
+     }
+ 
+     function test_CreateTokenRefundsExcessEth() public {
+         vm.deal(creator, 1 ether);
+         vm.prank(creator);
+-        factory.deployERC20Token{value: 1 ether}("Vezta Test", "VZT", "ipfs://metadata", weth);
++        factory.deployERC20Token{value: 1 ether}("Vezta Test", "VZT", "ipfs://metadata", weth, 0);
+         assertEq(creator.balance, 1 ether - CREATE_FEE);
+         assertEq(address(factory).balance, 0);
+     }
+@@ -63,7 +63,7 @@ contract TokenFactoryTest is BaseTest {
+         vm.deal(address(this), 1 ether);
+         vm.expectRevert(TokenFactory.EthTransferFailed.selector);
+         rejecter.execute{value: 1 ether}(
+-            address(factory), abi.encodeCall(factory.deployERC20Token, ("Vezta Test", "VZT", "", weth))
++            address(factory), abi.encodeCall(factory.deployERC20Token, ("Vezta Test", "VZT", "", weth, 0))
+         );
+     }
+ 
+@@ -71,7 +71,7 @@ contract TokenFactoryTest is BaseTest {
+         vm.prank(owner);
+         curve.setCreateFee(0);
+         vm.prank(creator);
+-        address token = factory.deployERC20Token("Free", "FREE", "", weth);
++        address token = factory.deployERC20Token("Free", "FREE", "", weth, 0);
+         assertEq(curve.getCurve(token).tokenTotalSupply, SUPPLY);
+         assertEq(curve.accruedEth(), 0);
+     }
+@@ -80,14 +80,14 @@ contract TokenFactoryTest is BaseTest {
+         vm.deal(creator, CREATE_FEE);
+         vm.prank(creator);
+         vm.expectRevert(TokenFactory.InsufficientValue.selector);
+-        factory.deployERC20Token{value: CREATE_FEE - 1}("Vezta Test", "VZT", "", weth);
++        factory.deployERC20Token{value: CREATE_FEE - 1}("Vezta Test", "VZT", "", weth, 0);
+     }
+ 
+     function test_RevertWhen_CreateTokenWithQuoteNotEnabled() public {
+         vm.deal(creator, CREATE_FEE);
+         vm.prank(creator);
+         vm.expectRevert(VeztaLaunchToken.QuoteNotEnabled.selector);
+-        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", alice);
++        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", alice, 0);
+     }
+ 
+     function test_RevertWhen_CreateTokenWithDisabledQuote() public {
+@@ -96,20 +96,20 @@ contract TokenFactoryTest is BaseTest {
+         vm.deal(creator, CREATE_FEE);
+         vm.prank(creator);
+         vm.expectRevert(VeztaLaunchToken.QuoteNotEnabled.selector);
+-        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", address(usdc));
++        factory.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "", address(usdc), 0);
+     }
+ 
+     function test_RevertWhen_CreateTokenBeforeCurveIsSet() public {
+         TokenFactory fresh = new TokenFactory(owner);
+         vm.expectRevert(TokenFactory.BondingCurveNotSet.selector);
+-        fresh.deployERC20Token("Vezta Test", "VZT", "", weth);
++        fresh.deployERC20Token("Vezta Test", "VZT", "", weth, 0);
+     }
+ 
+     function test_Attack_CreatePoolDirectlyIsRejected() public {
+         vm.deal(alice, CREATE_FEE);
+         vm.prank(alice);
+         vm.expectRevert(VeztaLaunchToken.NotFactory.selector);
+-        curve.createPool{value: CREATE_FEE}(alice, SUPPLY, alice, weth);
++        curve.createPool{value: CREATE_FEE}(alice, SUPPLY, alice, weth, 0);
+     }
+ 
+     function test_Attack_CreatePoolCannotOverwriteExistingCurve() public {
+@@ -117,16 +117,16 @@ contract TokenFactoryTest is BaseTest {
+         vm.deal(address(factory), CREATE_FEE);
+         vm.prank(address(factory));
+         vm.expectRevert(VeztaLaunchToken.CurveExists.selector);
+-        curve.createPool{value: CREATE_FEE}(token, SUPPLY, alice, weth);
++        curve.createPool{value: CREATE_FEE}(token, SUPPLY, alice, weth, 0);
+     }
+ 
+     function test_RevertWhen_CreatePoolWrongValueOrZeroAmount() public {
+         vm.deal(address(factory), 1 ether);
+         vm.startPrank(address(factory));
+         vm.expectRevert(VeztaLaunchToken.InsufficientValue.selector);
+-        curve.createPool{value: CREATE_FEE + 1}(alice, SUPPLY, alice, weth);
++        curve.createPool{value: CREATE_FEE + 1}(alice, SUPPLY, alice, weth, 0);
+         vm.expectRevert(VeztaLaunchToken.ZeroAmount.selector);
+-        curve.createPool{value: CREATE_FEE}(alice, 0, alice, weth);
++        curve.createPool{value: CREATE_FEE}(alice, 0, alice, weth, 0);
+         vm.stopPrank();
+     }
+ 
+diff --git a/test/utils/BaseTest.sol b/test/utils/BaseTest.sol
+index 3b833dd..b52d9a5 100644
+--- a/test/utils/BaseTest.sol
++++ b/test/utils/BaseTest.sol
+@@ -58,10 +58,21 @@ abstract contract BaseTest is Test {
+         return _createTokenWith(factory, creator, quote);
+     }
+ 
+-    function _createTokenWith(TokenFactory f, address who, address quote) internal returns (address token) {
++    function _createTokenWithWindow(address quote, uint32 window) internal returns (address) {
++        return _createTokenFull(factory, creator, quote, window);
++    }
++
++    function _createTokenWith(TokenFactory f, address who, address quote) internal returns (address) {
++        return _createTokenFull(f, who, quote, 0);
++    }
++
++    function _createTokenFull(TokenFactory f, address who, address quote, uint32 window)
++        internal
++        returns (address token)
++    {
+         vm.deal(who, who.balance + CREATE_FEE);
+         vm.prank(who);
+-        token = f.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", quote);
++        token = f.deployERC20Token{value: CREATE_FEE}("Vezta Test", "VZT", "ipfs://metadata", quote, window);
+     }
+ 
+     function _fundQuote(address who, address quote, uint256 amount) internal {
+````
+
+- [ ] **Step 2: Run and confirm RED**
+
+Run: `forge build`
+Expected: compilation FAIL (`Wrong argument count for function call: 5 arguments given but expected 4`, `Member "currentLaunchTaxBps" not found`).
+
+- [ ] **Step 3: Apply the source change**
+
+````diff
+diff --git a/contracts/TokenFactory.sol b/contracts/TokenFactory.sol
+index 312a4b1..7c280a1 100644
+--- a/contracts/TokenFactory.sol
++++ b/contracts/TokenFactory.sol
+@@ -40,25 +40,32 @@ contract TokenFactory is Ownable2Step, ReentrancyGuard {
+         string calldata name,
+         string calldata ticker,
+         string calldata metadataURI,
+-        address quoteToken
++        address quoteToken,
++        uint32 antiSniperWindow
+     ) external payable nonReentrant returns (address token) {
+         IVeztaLaunchToken curve = bondingCurve;
+         if (address(curve) == address(0)) revert BondingCurveNotSet();
+         uint256 fee = curve.createFee();
+         if (msg.value < fee) revert InsufficientValue();
+ 
+-        Token newToken = new Token(name, ticker, INITIAL_AMOUNT, address(curve));
+-        token = address(newToken);
++        token = address(new Token(name, ticker, INITIAL_AMOUNT, address(curve)));
++        _seedCurve(curve, token, fee, quoteToken, antiSniperWindow);
++        _refund(msg.value - fee);
++        emit TokenCreated(token, msg.sender, quoteToken, name, ticker, metadataURI);
++    }
++
++    function _seedCurve(IVeztaLaunchToken curve, address token, uint256 fee, address quoteToken, uint32 window)
++        private
++    {
+         // slither-disable-next-line unused-return (OpenZeppelin ERC20.approve returns true or reverts)
+-        newToken.approve(address(curve), INITIAL_AMOUNT);
+-        curve.createPool{value: fee}(token, INITIAL_AMOUNT, msg.sender, quoteToken);
++        Token(token).approve(address(curve), INITIAL_AMOUNT);
++        curve.createPool{value: fee}(token, INITIAL_AMOUNT, msg.sender, quoteToken, window);
++    }
+ 
+-        uint256 refund = msg.value - fee;
+-        if (refund != 0) {
+-            (bool ok,) = msg.sender.call{value: refund}("");
+-            if (!ok) revert EthTransferFailed();
+-        }
+-        emit TokenCreated(token, msg.sender, quoteToken, name, ticker, metadataURI);
++    function _refund(uint256 amount) private {
++        if (amount == 0) return;
++        (bool ok,) = msg.sender.call{value: amount}("");
++        if (!ok) revert EthTransferFailed();
+     }
+ 
+     function renounceOwnership() public pure override {
+diff --git a/contracts/VeztaLaunchToken.sol b/contracts/VeztaLaunchToken.sol
+index c8ed6f8..93a29f8 100644
+--- a/contracts/VeztaLaunchToken.sol
++++ b/contracts/VeztaLaunchToken.sol
+@@ -45,6 +45,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         uint256 creatorFeeBps;
+         bool complete;
+         bool migrated;
++        uint64 launchTime;
++        uint32 antiSniperWindow;
+     }
+ 
+     IWETH public immutable weth;
+@@ -65,7 +67,9 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+     mapping(address creator => mapping(address quote => uint256)) public creatorFees;
+     mapping(address quote => uint256) public totalCreatorFees;
+ 
+-    event CreatePool(address indexed mint, address indexed creator, address indexed quoteToken);
++    event CreatePool(
++        address indexed mint, address indexed creator, address indexed quoteToken, uint32 antiSniperWindow
++    );
+     event Trade(
+         address indexed mint,
+         uint256 quoteAmount,
+@@ -75,7 +79,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         uint256 timestamp,
+         uint256 virtualQuoteReserves,
+         uint256 virtualTokenReserves,
+-        uint256 fee
++        uint256 fee,
++        uint256 launchTax
+     );
+     event Complete(address indexed user, address indexed mint, uint256 timestamp);
+     event Migrated(address indexed mint, address indexed pair, uint256 quoteAmount, uint256 tokenAmount);
+@@ -109,6 +114,7 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+     error NothingToClaim();
+     error GraduationTooSmall();
+     error GraduationTooLarge();
++    error InvalidAntiSniperWindow();
+     error QuoteSupplyTooLarge();
+     error RenounceDisabled();
+ 
+@@ -194,7 +200,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+     // Pool creation
+     // ------------------------------------------------------------------
+ 
+-    function createPool(address token, uint256 amount, address creator, address quoteToken)
++    /// @param antiSniperWindow Seconds during which buys pay the decaying launch tax: 0, 60, 600 or 5880.
++    function createPool(address token, uint256 amount, address creator, address quoteToken, uint32 antiSniperWindow)
+         external
+         payable
+         nonReentrant
+@@ -202,6 +209,7 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         if (msg.sender != factory) revert NotFactory();
+         if (msg.value != createFee) revert InsufficientValue();
+         if (amount == 0) revert ZeroAmount();
++        if (!_isPresetWindow(antiSniperWindow)) revert InvalidAntiSniperWindow();
+         QuoteConfig memory config = quotes[quoteToken];
+         if (!config.enabled) revert QuoteNotEnabled();
+         Curve storage c = curves[token];
+@@ -220,11 +228,13 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         c.tokenTotalSupply = amount;
+         c.floor = CurveMath.floorOf(amount);
+         c.creatorFeeBps = creatorFeeBps;
++        c.launchTime = uint64(block.timestamp);
++        c.antiSniperWindow = antiSniperWindow;
+         accruedEth += msg.value;
+ 
+         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+         ILaunchToken(token).setPair(pair);
+-        emit CreatePool(token, creator, quoteToken);
++        emit CreatePool(token, creator, quoteToken, antiSniperWindow);
+     }
+ 
+     // ------------------------------------------------------------------
+@@ -235,6 +245,13 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         return curves[token];
+     }
+ 
++    /// @notice Current anti-sniper launch tax on buys of `token`, in bps of the amount paid.
++    function currentLaunchTaxBps(address token) external view returns (uint256) {
++        Curve storage c = curves[token];
++        if (c.tokenTotalSupply == 0) revert CurveNotFound();
++        return _launchTaxBps(c);
++    }
++
+     // ------------------------------------------------------------------
+     // Buying
+     // ------------------------------------------------------------------
+@@ -288,6 +305,14 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         return _quoteBuy(_activeCurve(token), amount, type(uint256).max);
+     }
+ 
++    function _isPresetWindow(uint32 window) private pure returns (bool) {
++        return window == 0 || window == 60 || window == 600 || window == 5_880;
++    }
++
++    function _launchTaxBps(Curve storage c) private view returns (uint256) {
++        return CurveMath.launchTaxBps(block.timestamp - c.launchTime, c.antiSniperWindow);
++    }
++
+     function _activeCurve(address token) private view returns (Curve storage c) {
+         c = curves[token];
+         if (c.tokenTotalSupply == 0) revert CurveNotFound();
+@@ -303,7 +328,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         uint256 sellable = c.realTokenReserves - c.floor;
+         amountOut = amount > sellable ? sellable : amount;
+         quoteCost = CurveMath.buyCost(c.virtualTokenReserves, c.virtualQuoteReserves, amountOut);
+-        fee = CurveMath.feeOf(quoteCost, tradeFeeBps);
++        uint256 baseFee = CurveMath.feeOf(quoteCost, tradeFeeBps);
++        fee = baseFee + CurveMath.taxOn(quoteCost + baseFee, _launchTaxBps(c));
+         if (quoteCost + fee > maxQuoteCost) revert SlippageExceeded();
+     }
+ 
+@@ -313,6 +339,9 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+         c.realTokenReserves -= amountOut;
+         c.realQuoteReserves += quoteCost;
+         _accrueFee(c, fee);
++        // Intended equality: the final buy is clipped to land exactly on the floor, and realTokenReserves is
++        // internal accounting that donations cannot change.
++        // slither-disable-next-line incorrect-equality
+         if (c.realTokenReserves == c.floor) {
+             c.complete = true;
+             emit Complete(msg.sender, token, block.timestamp);
+@@ -327,7 +356,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+             block.timestamp,
+             c.virtualQuoteReserves,
+             c.virtualTokenReserves,
+-            fee
++            fee,
++            fee - CurveMath.feeOf(quoteCost, tradeFeeBps)
+         );
+     }
+ 
+@@ -407,7 +437,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
+             block.timestamp,
+             c.virtualQuoteReserves,
+             c.virtualTokenReserves,
+-            fee
++            fee,
++            0
+         );
+     }
+ 
+diff --git a/contracts/interfaces/IVeztaLaunchToken.sol b/contracts/interfaces/IVeztaLaunchToken.sol
+index dbfee88..c365e5b 100644
+--- a/contracts/interfaces/IVeztaLaunchToken.sol
++++ b/contracts/interfaces/IVeztaLaunchToken.sol
+@@ -4,5 +4,7 @@ pragma solidity ^0.8.24;
+ /// @notice Subset of VeztaLaunchToken used by TokenFactory.
+ interface IVeztaLaunchToken {
+     function createFee() external view returns (uint256);
+-    function createPool(address token, uint256 amount, address creator, address quoteToken) external payable;
++    function createPool(address token, uint256 amount, address creator, address quoteToken, uint32 antiSniperWindow)
++        external
++        payable;
+ }
+diff --git a/contracts/libraries/CurveMath.sol b/contracts/libraries/CurveMath.sol
+index 940fe55..27381dc 100644
+--- a/contracts/libraries/CurveMath.sol
++++ b/contracts/libraries/CurveMath.sol
+@@ -10,6 +10,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+ ///      last curve price equals the pool price G / (S / 5) (seamless graduation).
+ library CurveMath {
+     uint256 internal constant BPS = 10_000;
++    /// @dev Launch tax at the very start of the window, on top of the base fee (98% + 1% base is about 99%).
++    uint256 internal constant MAX_LAUNCH_TAX_BPS = 9_800;
+ 
+     function initialVirtualToken(uint256 supply) internal pure returns (uint256) {
+         return supply * 16 / 15;
+@@ -35,6 +37,19 @@ library CurveMath {
+         return virtualQuote - newVirtualQuote;
+     }
+ 
++    /// @notice Anti-sniper launch tax rate: starts at MAX_LAUNCH_TAX_BPS and decays linearly to zero over
++    ///         `window` seconds. Zero for an empty window or once the window has elapsed.
++    function launchTaxBps(uint256 elapsed, uint256 window) internal pure returns (uint256) {
++        if (window == 0 || elapsed >= window) return 0;
++        return MAX_LAUNCH_TAX_BPS * (window - elapsed) / window;
++    }
++
++    /// @notice Tax such that tax / (subtotal + tax) equals `taxBps`. Rounds up (favours the platform).
++    function taxOn(uint256 subtotal, uint256 taxBps) internal pure returns (uint256) {
++        if (taxBps == 0) return 0;
++        return Math.mulDiv(subtotal, taxBps, BPS - taxBps, Math.Rounding.Ceil);
++    }
++
+     /// @notice Fee on `amount`, rounded down. Dust trades on quotes with very few decimals can round to
+     ///         zero fee; the platform accepts that rather than over-charging every other trade.
+     function feeOf(uint256 amount, uint256 feeBps) internal pure returns (uint256) {
+````
+
+- [ ] **Step 4: Run and confirm GREEN**
+
+Run: `forge test --no-match-path "test/invariant/*"`
+Expected: `223 tests passed`. If `forge build` reports `Stack too deep` in `TokenFactory`, the private-helper refactor in the diff above was not applied.
+
+- [ ] **Step 5: Run the invariants, which now warp time and pick random windows**
+
+Run: `forge test --match-path "test/invariant/*"`
+Expected: `8 passed`.
+
+- [ ] **Step 6: Mutation smoke on the new logic**
+
+Break each of these one at a time, run `forge test --no-match-path "test/invariant/*"`, and confirm at least one test fails, then restore the line: never charge the tax (`fee = baseFee`); ignore the window end (return the maximum forever); round the tax down; accept any window; tax sells; never set `launchTime`; report `fee` as `launchTax` in the event; let the tax enter `realQuoteReserves`. All eight were killed when this was executed.
+
+- [ ] **Step 7: Coverage, Slither, live fork, snapshot**
+
+Run: `forge coverage --report summary --no-match-coverage "(test|script)"`, `.venv/bin/slither . --filter-paths "lib/|test/|script/"`, `SEPOLIA_RPC_URL=<rpc> forge test --match-path "test/fork/*"`, `forge snapshot --no-match-path "test/{invariant,fork}/*"`
+Expected: 100% lines and branches (265/265 and 50/50); Slither reports one new Medium `incorrect-equality` on `c.realTokenReserves == c.floor` (intended: the final buy is clipped to land exactly on the floor and `realTokenReserves` is internal accounting) which the code silences with a `slither-disable-next-line` directive placed on its own line directly above the `if`, plus four Low `timestamp` findings that are accepted; both fork tests pass.
+
+- [ ] **Step 8: Commit** `feat: add creator-chosen anti-sniper launch tax on buys` (including `.gas-snapshot`).
+
+- [ ] **Step 9: Update README and CLAUDE.md, then commit**
+
+````diff
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 52a67f8..487abe4 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -27,12 +27,13 @@ The design spec is kept locally by the maintainer and is not published; the comm
+ 
+ ## Architecture
+ 
+-- `contracts/TokenFactory.sol` — entry point. `deployERC20Token(name, ticker, metadataURI, quoteToken)`
++- `contracts/TokenFactory.sol` — entry point. `deployERC20Token(name, ticker, metadataURI, quoteToken, antiSniperWindow)`
+   deploys a `Token`, pays the ETH create fee and calls `VeztaLaunchToken.createPool`. Metadata is only
+   emitted in `TokenCreated`.
+ - `contracts/VeztaLaunchToken.sol` — bonding-curve AMM and vault. Per-token `Curve` struct; quote
+   whitelist (`setQuote`); `buy`/`sell` (ERC20 quote) and `buyWithEth`/`sellForEth` (WETH curves);
+-  permissionless `migrate`; fees accrue in `accruedQuoteFees` / `accruedEth` / `creatorFees` and are
++  anti-sniper launch tax on buys (creator-chosen window of 0/60/600/5880 s, decaying 98% -> 0, taxed on the
++  amount paid, never enters the curve); permissionless `migrate`; fees accrue in `accruedQuoteFees` / `accruedEth` / `creatorFees` and are
+   paid out by permissionless `claim*` functions to fixed recipients.
+ - `contracts/Token.sol` — ERC20 that blocks transfers into its own Uniswap pair until migration, so
+   nobody can seed the pool price before the curve does.
+diff --git a/README.md b/README.md
+index 4f494a7..62b209e 100644
+--- a/README.md
++++ b/README.md
+@@ -11,12 +11,16 @@ Built with [Foundry](https://book.getfoundry.sh/). Current target: Ethereum Sepo
+ 
+ ## How it works
+ 
+-1. `TokenFactory.deployERC20Token(name, ticker, metadataURI, quoteToken)` deploys a `Token`, pays the ETH
+-   create fee, and seeds a bonding curve in `VeztaLaunchToken`.
++1. `TokenFactory.deployERC20Token(name, ticker, metadataURI, quoteToken, antiSniperWindow)` deploys a `Token`,
++   pays the ETH create fee, and seeds a bonding curve in `VeztaLaunchToken`.
+ 2. Buyers and sellers trade against the curve (`buy` / `sell`, or `buyWithEth` / `sellForEth` for WETH curves).
+    A trade fee is charged; part of it goes to the token's creator.
+-3. When 80% of the supply is sold, the curve is `complete` and trading stops.
+-4. Anyone calls `migrate(token)`: the quote and the remaining 20% of supply go straight into the Uniswap V2 pair
++3. **Anti-sniper launch tax.** The creator picks a window (0, 60 seconds, 10 minutes or 98 minutes). Buys inside
++   the window pay a tax that starts at about 99% of the amount paid (98% tax plus the 1% base fee) and decays
++   linearly to zero; sells are never taxed. The tax is booked like any other fee (20% creator, 80% platform) and
++   never enters the curve, so the graduation math and the price continuity below are unchanged.
++4. When 80% of the supply is sold, the curve is `complete` and trading stops.
++5. Anyone calls `migrate(token)`: the quote and the remaining 20% of supply go straight into the Uniswap V2 pair
+    and the LP tokens are sent to the dead address. The token then trades freely on Uniswap.
+ 
+ The curve is constant-product with virtual reserves chosen so that the last curve price **equals** the
+@@ -79,5 +83,7 @@ Migration is permissionless, so any wallet or bot can call `migrate(token)` afte
+   curve contract were blacklisted, that curve's funds would be stuck.
+ - If `migrate` reverts for an external reason, a completed curve has no rescue path by design (there is no owner
+   withdrawal).
++- The launch tax reads `block.timestamp`. A validator can skew it by a few seconds, which changes the tax by a few
++  percent at most (the shortest window is 60 seconds).
+ - Every failure path and exploit attempt has a test (`test/attack/`, `test/invariant/`); coverage is 100% of
+   lines and branches, and Slither reports no High or Medium findings.
+````
+
+Commit message: `docs: describe the anti-sniper launch tax`.
+
+### Test catalogue for Part 2
+
+| Area | Tests |
+|---|---|
+| Supply limit | `Admin.t.sol`: `test_RevertWhen_SetQuoteSupplyTooLarge`, `test_SetQuoteAtExactSupplyLimit`, `test_DisablingAQuoteIgnoresItsSupply`; `SupplyLimit.t.sol`: `test_Attack_WholeAllowedSupplyDonatedToPairCannotBrickMigrate` |
+| Launch tax math | `CurveMath.t.sol`: `test_LaunchTaxBps`, `testFuzz_LaunchTaxNeverIncreasesAndIsBounded`, `test_TaxOn`, `testFuzz_TaxIsTheRequestedShareOfTheTotal` |
+| Launch tax on the curve (WETH and USDC) | `LaunchTax.t.sol`: stored window and launch time, all presets accepted, non-presets rejected, tax paid at creation, linear decay to zero, one second before the end still taxed, zero window has no tax, sells never taxed, curve math and graduation unchanged, `maxQuoteCost` protection, creator self-sniping still pays most of the tax, `Trade` carries `launchTax`, unknown token reverts; `LaunchTaxEthTest`: `buyWithEth` pays tax and refunds the excess |
+| Launch tax attacks | `LaunchTaxAttacks.t.sol`: splitting a buy does not reduce the tax, edge of the window is not bypassed, the launch clock is fixed at creation |
+| Invariants | `LaunchpadHandler.sol`: random windows per token and a `warp` action, all 8 invariants unchanged |
+
+### Reference for a Solana port
+
+The final design, the invariants worth keeping, the pitfalls found by review and mutation testing, and a concept mapping from EVM to Solana are in section 12 of the spec (`docs/superpowers/specs/2026-09-19-evm-launchpad-contracts-design.md`, local file). The pieces that are chain-independent are the curve math (`CurveMath`), the fee semantics (buy fee on top, sell fee deducted, tax on the amount paid), the fee ledgers and the attack and invariant test catalogue above.
