@@ -74,7 +74,8 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         address indexed user,
         uint256 timestamp,
         uint256 virtualQuoteReserves,
-        uint256 virtualTokenReserves
+        uint256 virtualTokenReserves,
+        uint256 fee
     );
     event Complete(address indexed user, address indexed mint, uint256 timestamp);
     event Migrated(address indexed mint, address indexed pair, uint256 quoteAmount, uint256 tokenAmount);
@@ -317,7 +318,17 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
             emit Complete(msg.sender, token, block.timestamp);
         }
         IERC20(token).safeTransfer(msg.sender, amountOut);
-        emit Trade(token, quoteCost, amountOut, true, msg.sender, block.timestamp, c.virtualQuoteReserves, c.virtualTokenReserves);
+        emit Trade(
+            token,
+            quoteCost,
+            amountOut,
+            true,
+            msg.sender,
+            block.timestamp,
+            c.virtualQuoteReserves,
+            c.virtualTokenReserves,
+            fee
+        );
     }
 
     /// @dev Splits a trade fee between the token creator (snapshot bps) and the platform.
@@ -387,7 +398,17 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         _accrueFee(c, fee);
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        emit Trade(token, quoteOut, amount, false, msg.sender, block.timestamp, c.virtualQuoteReserves, c.virtualTokenReserves);
+        emit Trade(
+            token,
+            quoteOut,
+            amount,
+            false,
+            msg.sender,
+            block.timestamp,
+            c.virtualQuoteReserves,
+            c.virtualTokenReserves,
+            fee
+        );
     }
 
     // ------------------------------------------------------------------

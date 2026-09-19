@@ -52,12 +52,12 @@ abstract contract SellTestBase is BaseTest {
 
     function test_SellEmitsTrade() public {
         VeztaLaunchToken.Curve memory c = curve.getCurve(token);
-        (uint256 quoteOut,) = curve.previewSell(token, 1e18);
+        (uint256 quoteOut, uint256 fee) = curve.previewSell(token, 1e18);
         vm.startPrank(alice);
         IERC20(token).approve(address(curve), 1e18);
         vm.expectEmit(address(curve));
         emit VeztaLaunchToken.Trade(
-            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18
+            token, quoteOut, 1e18, false, alice, block.timestamp, c.virtualQuoteReserves - quoteOut, c.virtualTokenReserves + 1e18, fee
         );
         curve.sell(token, 1e18, 0);
         vm.stopPrank();

@@ -57,14 +57,14 @@ abstract contract BuyTestBase is BaseTest {
     }
 
     function test_BuyEmitsTrade() public {
-        (, uint256 cost,) = curve.previewBuy(token, 1e18);
+        (, uint256 cost, uint256 fee) = curve.previewBuy(token, 1e18);
         VeztaLaunchToken.Curve memory c = curve.getCurve(token);
         _fundQuote(alice, quote, cost * 2);
         vm.startPrank(alice);
         IERC20(quote).approve(address(curve), type(uint256).max);
         vm.expectEmit(address(curve));
         emit VeztaLaunchToken.Trade(
-            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18
+            token, cost, 1e18, true, alice, block.timestamp, c.virtualQuoteReserves + cost, c.virtualTokenReserves - 1e18, fee
         );
         curve.buy(token, 1e18, type(uint256).max);
         vm.stopPrank();

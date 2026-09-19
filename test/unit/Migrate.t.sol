@@ -46,7 +46,7 @@ abstract contract MigrateTestBase is BaseTest {
         assertApproxEqAbs(quoteReserve, _graduationOf(quote), 2);
 
         // seamless price: last curve price vQ / vT equals pool price quoteReserve / tokenReserve
-        assertApproxEqRel(c.virtualQuoteReserves * tokenReserve, quoteReserve * c.virtualTokenReserves, 1e13);
+        assertApproxEqRel(c.virtualQuoteReserves * tokenReserve, quoteReserve * c.virtualTokenReserves, 5e11);
 
         uint256 lpSupply = IUniswapV2Pair(pair).totalSupply();
         assertEq(IUniswapV2Pair(pair).balanceOf(DEAD), lpSupply - MINIMUM_LIQUIDITY);

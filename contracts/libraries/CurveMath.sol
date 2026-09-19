@@ -35,6 +35,8 @@ library CurveMath {
         return virtualQuote - newVirtualQuote;
     }
 
+    /// @notice Fee on `amount`, rounded down. Dust trades on quotes with very few decimals can round to
+    ///         zero fee; the platform accepts that rather than over-charging every other trade.
     function feeOf(uint256 amount, uint256 feeBps) internal pure returns (uint256) {
         return amount * feeBps / BPS;
     }
