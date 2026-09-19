@@ -419,4 +419,35 @@ contract VeztaLaunchToken is IVeztaLaunchToken, Ownable2Step, ReentrancyGuard {
         // slither-disable-next-line unused-return (LP amount is not needed; all LP goes to DEAD)
         IUniswapV2Pair(pair).mint(DEAD);
     }
+
+    // ------------------------------------------------------------------
+    // Fee claims (anyone can call; funds only go to the fixed recipient)
+    // ------------------------------------------------------------------
+
+    function claimFees(address quote) external nonReentrant {
+        uint256 amount = accruedQuoteFees[quote];
+        if (amount == 0) revert NothingToClaim();
+        accruedQuoteFees[quote] = 0;
+        address recipient = feeRecipient;
+        IERC20(quote).safeTransfer(recipient, amount);
+        emit FeesClaimed(quote, recipient, amount);
+    }
+
+    function claimCreateFees() external nonReentrant {
+        uint256 amount = accruedEth;
+        if (amount == 0) revert NothingToClaim();
+        accruedEth = 0;
+        address recipient = feeRecipient;
+        _sendEth(recipient, amount);
+        emit CreateFeesClaimed(recipient, amount);
+    }
+
+    function claimCreatorFees(address creator, address quote) external nonReentrant {
+        uint256 amount = creatorFees[creator][quote];
+        if (amount == 0) revert NothingToClaim();
+        creatorFees[creator][quote] = 0;
+        totalCreatorFees[quote] -= amount;
+        IERC20(quote).safeTransfer(creator, amount);
+        emit CreatorFeesClaimed(creator, quote, amount);
+    }
 }
