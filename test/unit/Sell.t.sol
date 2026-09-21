@@ -95,10 +95,14 @@ abstract contract SellTestBase is BaseTest {
         curve.previewSell(token, 0);
     }
 
-    function test_RevertWhen_SellWithoutApproval() public {
+    /// @dev The token lets its bonding curve take tokens from a caller who has sold to it, so a sale is one transaction: no approve first.
+    function test_SellNeedsNoApproval() public {
+        assertEq(IERC20(token).allowance(alice, address(curve)), type(uint256).max);
         vm.prank(alice);
-        vm.expectRevert();
-        curve.sell(token, 1e18, 0);
+        uint256 payout = curve.sell(token, 40_000_000e18, 0);
+        assertGt(payout, 0);
+        assertEq(IERC20(token).balanceOf(alice), 60_000_000e18);
+        assertEq(IERC20(token).allowance(alice, address(curve)), type(uint256).max); // and nothing was used up
     }
 
     function test_RevertWhen_SellMoreThanHeld() public {

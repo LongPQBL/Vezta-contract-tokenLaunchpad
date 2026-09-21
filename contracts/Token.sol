@@ -36,6 +36,18 @@ contract Token is ERC20, ILaunchToken {
         tradingOpen = true;
     }
 
+    /// @notice The bonding curve is always approved to take tokens from whoever calls it, so selling is one transaction and no `approve` comes
+    ///         first. Everyone else's allowance is the ordinary ERC-20 one.
+    /// @dev Safe because the curve only ever pulls from `msg.sender` (`createPool` from the factory, and a sale from the seller): it has no
+    ///      function that takes tokens from anyone else. `bondingCurve` is immutable, so nothing can change who this applies to. OpenZeppelin's
+    ///      `_spendAllowance` reads this value and does not spend an allowance of `type(uint256).max`, so it is never used up. A consequence: it
+    ///      cannot be withdrawn, and `approve(curve, 0)` changes nothing. The pool lock in `_update` still applies to every transfer, the curve's
+    ///      included.
+    function allowance(address owner, address spender) public view override returns (uint256) {
+        if (spender == bondingCurve) return type(uint256).max;
+        return super.allowance(owner, spender);
+    }
+
     function _update(address from, address to, uint256 value) internal override {
         if (!tradingOpen && to == pair && pair != address(0) && from != bondingCurve) {
             revert TransferToPairLocked();

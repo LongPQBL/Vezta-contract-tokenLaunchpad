@@ -37,7 +37,9 @@ The design spec is kept locally by the maintainer and is not published; the comm
   amount paid, never enters the curve); permissionless `migrate`; fees accrue in `accruedQuoteFees` / `accruedEth` / `creatorFees` and are
   paid out by permissionless `claim*` functions to fixed recipients.
 - `contracts/Token.sol` — ERC20 that blocks transfers into its own Uniswap pair until migration, so
-  nobody can seed the pool price before the curve does.
+  nobody can seed the pool price before the curve does. Its bonding curve is always approved
+  (`allowance(owner, curve)` is `type(uint256).max`), so selling is one transaction with no `approve`; safe because
+  the curve only ever pulls from `msg.sender`. It cannot be revoked (`approve(curve, 0)` changes nothing).
 - `contracts/libraries/CurveMath.sol` — curve math. With L = 20% kept for the pool: virtual token
   `16/15 * S`, virtual quote `G / 3`, floor `S / 5`; graduation collects `G` (within a few units of
   rounding) and the last curve price equals the pool price (to within rounding). Do not change one constant without re-deriving the others.
