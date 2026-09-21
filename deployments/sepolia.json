@@ -1,0 +1,16 @@
+{
+  "chainId": 11155111,
+  "deployBlock": 11752845,
+  "deployedAt": 1790017704,
+  "deployer": "0xb95697b63317A4f7C9Bd6378D1f0E261718CB6bA",
+  "factory": "0x18660e78954815568E5cD7649b0F3945d2989C49",
+  "feeRecipient": "0xb95697b63317A4f7C9Bd6378D1f0E261718CB6bA",
+  "gitCommit": "8aeb826",
+  "launchpad": "0x86f37A664B7CDDe4fe3F6757b1ab4Db5D819f02F",
+  "owner": "0xb95697b63317A4f7C9Bd6378D1f0E261718CB6bA",
+  "ownershipAccepted": true,
+  "pairInitCodeHash": "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f",
+  "uniswapV2Factory": "0xF62c03E08ada871A0bEb309762E260a7a6a880E6",
+  "uniswapV2Router": "0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3",
+  "weth": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"
+}
