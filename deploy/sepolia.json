@@ -7,5 +7,5 @@
   "creatorFeeBps": 2000,
   "router": "0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3",
   "pairInitCodeHash": "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f",
-  "wethGraduationAmount": "400000000000000000"
+  "wethGraduationAmount": "50000000000000000"
 }
